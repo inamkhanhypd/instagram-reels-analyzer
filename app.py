@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 import time
 import requests
 import json
+from version import get_version_info
 
 # ----------------------------
 # Streamlit Page Configuration
@@ -41,13 +42,17 @@ input, textarea { background:#141925 !important; color:#e6edf3 !important; borde
 # ----------------------------
 # UI Header
 # ----------------------------
+# Get version info
+version_info = get_version_info()
+
 st.markdown("# Instagram Reels Analyzer")
-st.markdown("""
+st.markdown(f"""
 <div class='header-logo'>
   <div class='badge'>A</div>
   <div>
     <div style='font-weight:600; font-size:20px;'>Logo</div>
     <div style='color:#9aa4b2; font-size:13px;'>Sleek tabbed interface</div>
+    <div style='color:#b8c5d6; font-size:11px; margin-top: 5px;'>Version {version_info['version']} | Built {version_info['build_date']}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -579,21 +584,24 @@ def fetch_user_id_with_cookies(username: str, cookie_header: str) -> Optional[st
 def reels_to_dataframe(items: List[Dict[str, Any]]) -> pd.DataFrame:
     if not items:
         return pd.DataFrame(
-            columns=["Media PK", "Reel URL", "Reel Code", "Likes", "Comments", "Plays", "Posted On"]
+            columns=["Shortcode", "Posted On", "Caption", "Media Type", "Plays", "Likes", "Comments"]
         )
 
     rows = []
     for it in items:
+        # Create clickable shortcode link
+        shortcode = it.get("shortcode", "")
+        reel_link = f"https://www.instagram.com/reel/{shortcode}/" if shortcode else ""
+        
         rows.append(
             {
-                "Media PK": it.get("media_pk", ""),
-                "Reel URL": build_reel_url(it["shortcode"]),
-                "Reel Code": it["shortcode"],
+                "Shortcode": f"[{shortcode}]({reel_link})" if shortcode else "",
+                "Posted On": to_yyyymmdd(it["taken_at_timestamp"]),
+                "Caption": it.get("caption", ""),
+                "Media Type": it.get("product_type", "reel"),
+                "Plays": it.get("video_view_count", 0),
                 "Likes": it["likes"],
                 "Comments": it["comments"],
-                # Keep Plays unformatted (exact number)
-                "Plays": it.get("video_view_count"),
-                "Posted On": to_yyyymmdd(it["taken_at_timestamp"]),
                 "_sort_ts": it["taken_at_timestamp"].timestamp(),
             }
         )
@@ -799,17 +807,13 @@ with tab_profile:
                                             media_id = fetch_media_id_via_bulk_route(sc, cookie_header_global) or ""
                                         if not media_id:
                                             rows.append({
-                                                "media_id": "",
-                                                "shortcode": sc,
+                                                "shortcode": f"[{sc}](https://www.instagram.com/reel/{sc}/)" if sc else "",
                                                 "posted_on": "",
+                                                "caption": "",
                                                 "media_type": "",
                                                 "play_count": "",
                                                 "like_count": "",
                                                 "comment_count": "",
-                                                "owner_username": "",
-                                                "owner_full_name": "",
-                                                "owner_user_id": "",
-                                                "caption": "",
                                                 "status": "not found",
                                             })
                                             prog.progress(min((idx + 1) / total, 1.0))
@@ -829,33 +833,27 @@ with tab_profile:
                                         except Exception:
                                             cap = ""
 
+                                        shortcode = stats.get("shortcode") or sc
                                         rows.append({
-                                            "media_id": media_id,
-                                            "shortcode": stats.get("shortcode") or sc,
+                                            "shortcode": f"[{shortcode}](https://www.instagram.com/reel/{shortcode}/)" if shortcode else "",
                                             "posted_on": stats.get("posted_on"),
+                                            "caption": cap,
                                             "media_type": stats.get("product_type") or stats.get("media_type"),
                                             "play_count": stats.get("play_count"),
                                             "like_count": stats.get("like_count"),
                                             "comment_count": stats.get("comment_count"),
-                                            "owner_username": owner.get("username") or username_to_use,
-                                            "owner_full_name": owner.get("full_name"),
-                                            "owner_user_id": owner.get("user_id"),
-                                            "caption": cap,
                                             "status": "ok",
                                         })
                                     except Exception as e:
+                                        sc = it.get("shortcode") or ""
                                         rows.append({
-                                            "media_id": it.get("media_pk") or "",
-                                            "shortcode": it.get("shortcode") or "",
+                                            "shortcode": f"[{sc}](https://www.instagram.com/reel/{sc}/)" if sc else "",
                                             "posted_on": "",
+                                            "caption": "",
                                             "media_type": "",
                                             "play_count": "",
                                             "like_count": "",
                                             "comment_count": "",
-                                            "owner_username": username_to_use,
-                                            "owner_full_name": "",
-                                            "owner_user_id": "",
-                                            "caption": "",
                                             "status": f"error: {type(e).__name__}",
                                         })
 
@@ -925,17 +923,13 @@ with tab_reels:
                         media_id = fetch_media_id_via_bulk_route(sc, cookie_header_global)
                         if not media_id:
                             rows.append({
-                                "media_id": "",
-                                "shortcode": sc,
+                                "shortcode": f"[{sc}](https://www.instagram.com/reel/{sc}/)" if sc else "",
                                 "posted_on": "",
+                                "caption": "",
                                 "media_type": "",
                                 "play_count": "",
                                 "like_count": "",
                                 "comment_count": "",
-                                "owner_username": "",
-                                "owner_full_name": "",
-                                "owner_user_id": "",
-                                "caption": "",
                                 "status": "not found",
                             })
                             try:
@@ -970,33 +964,26 @@ with tab_reels:
                             ) or ""
                         except Exception:
                             cap = ""
+                        shortcode = stats.get("shortcode") or sc
                         rows.append({
-                            "media_id": media_id,
-                            "shortcode": stats.get("shortcode") or sc,
+                            "shortcode": f"[{shortcode}](https://www.instagram.com/reel/{shortcode}/)" if shortcode else "",
                             "posted_on": stats.get("posted_on"),
+                            "caption": cap,
                             "media_type": stats.get("product_type") or stats.get("media_type"),
                             "play_count": stats.get("play_count"),
                             "like_count": stats.get("like_count"),
                             "comment_count": stats.get("comment_count"),
-                            "owner_username": owner.get("username"),
-                            "owner_full_name": owner.get("full_name"),
-                            "owner_user_id": owner.get("user_id"),
-                            "caption": cap,
                             "status": "ok",
                         })
                     except Exception as e:
                         rows.append({
-                            "media_id": "",
-                            "shortcode": token,
+                            "shortcode": f"[{token}](https://www.instagram.com/reel/{token}/)" if token else "",
                             "posted_on": "",
+                            "caption": "",
                             "media_type": "",
                             "play_count": "",
                             "like_count": "",
                             "comment_count": "",
-                            "owner_username": "",
-                            "owner_full_name": "",
-                            "owner_user_id": "",
-                            "caption": "",
                             "status": f"error: {type(e).__name__}",
                         })
                     try:

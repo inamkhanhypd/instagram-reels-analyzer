@@ -658,122 +658,6 @@ tab_profile, tab_reels = st.tabs(["Analyze Profile", "Analyze Reels"])
 with tab_profile:
     st.subheader("Analyze Profile")
     
-    # CSV Upload Section
-    st.markdown("**Option 1: Upload CSV of Reel Links**")
-    uploaded_file = st.file_uploader(
-        "Choose a CSV file with reel links",
-        type="csv",
-        help="CSV should have a column with Instagram reel URLs (e.g., 'https://www.instagram.com/reel/ABC123/')",
-        key="csv_uploader"
-    )
-    
-    if uploaded_file is not None:
-        try:
-            # Read CSV
-            df_uploaded = pd.read_csv(uploaded_file)
-            st.success(f"✅ CSV uploaded successfully! Found {len(df_uploaded)} rows.")
-            
-            # Find the column with reel links
-            reel_links = []
-            for col in df_uploaded.columns:
-                if df_uploaded[col].astype(str).str.contains('instagram.com/reel/', na=False).any():
-                    reel_links = df_uploaded[col].dropna().tolist()
-                    st.info(f"📊 Found reel links in column: '{col}'")
-                    break
-            
-            if not reel_links:
-                st.error("❌ No Instagram reel links found in the CSV. Please ensure your CSV contains URLs like 'https://www.instagram.com/reel/ABC123/'")
-            else:
-                st.write(f"🔗 Processing {len(reel_links)} reel links...")
-                
-                # Process the reel links
-                if st.button("Process CSV Reel Links", type="primary", key="process_csv"):
-                    if not cookie_header_global:
-                        st.error("Cookie header is required. Paste your Instagram Cookie header above.")
-                    else:
-                        with st.spinner("Processing CSV reel links..."):
-                            rows = []
-                            total = len(reel_links)
-                            prog = st.progress(0)
-                            table_ph = st.empty()
-                            
-                            for idx, link in enumerate(reel_links):
-                                try:
-                                    sc = extract_shortcode(link) or link
-                                    media_id = fetch_media_id_via_bulk_route(sc, cookie_header_global)
-                                    if not media_id:
-                                        rows.append({
-                                            "Reel Link": link,
-                                            "posted_on": "",
-                                            "caption": "",
-                                            "media_type": "",
-                                            "play_count": "",
-                                            "like_count": "",
-                                            "comment_count": "",
-                                            "status": "not found",
-                                        })
-                                        prog.progress(min((idx + 1) / total, 1.0))
-                                        continue
-                                    
-                                    ref = f"https://www.instagram.com/p/{sc}/"
-                                    try:
-                                        stats = fetch_media_stats_by_pk(media_id, cookie_header_global, referer_url=ref)
-                                    except Exception:
-                                        stats = {}
-                                    try:
-                                        cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
-                                    except Exception:
-                                        cap = ""
-                                    
-                                    rows.append({
-                                        "Reel Link": link,
-                                        "posted_on": stats.get("posted_on"),
-                                        "caption": cap,
-                                        "media_type": stats.get("product_type") or stats.get("media_type"),
-                                        "play_count": stats.get("play_count"),
-                                        "like_count": stats.get("like_count"),
-                                        "comment_count": stats.get("comment_count"),
-                                        "status": "ok",
-                                    })
-                                except Exception as e:
-                                    rows.append({
-                                        "Reel Link": link,
-                                        "posted_on": "",
-                                        "caption": "",
-                                        "media_type": "",
-                                        "play_count": "",
-                                        "like_count": "",
-                                        "comment_count": "",
-                                        "status": f"error: {type(e).__name__}",
-                                    })
-                                
-                                # Incremental render
-                                try:
-                                    df_inc = pd.DataFrame(rows)
-                                    table_ph.dataframe(df_inc, use_container_width=True, hide_index=True)
-                                except Exception:
-                                    table_ph.write(rows[-1])
-                                prog.progress(min((idx + 1) / total, 1.0))
-                            
-                            # Final render
-                            if rows:
-                                df_final = pd.DataFrame(rows)
-                                table_ph.dataframe(df_final, use_container_width=True, hide_index=True)
-                                
-                                # Download CSV
-                                csv_bytes = df_final.to_csv(index=False).encode("utf-8")
-                                st.download_button(
-                                    label="Download Results CSV",
-                                    data=csv_bytes,
-                                    file_name=f"instagram_reels_analysis_{len(rows)}.csv",
-                                    mime="text/csv"
-                                )
-        except Exception as e:
-            st.error(f"Error reading CSV: {e}")
-    
-    st.markdown("---")
-    st.markdown("**Option 2: Analyze by Username**")
-    
     col1, col2 = st.columns([3, 1])
     with col1:
         username_input = st.text_input(
@@ -1004,6 +888,123 @@ with tab_profile:
 
 with tab_reels:
     st.subheader("Analyze Reels")
+    
+    # CSV Upload Section
+    st.markdown("**Option 1: Upload CSV of Reel Links**")
+    uploaded_file = st.file_uploader(
+        "Choose a CSV file with reel links",
+        type="csv",
+        help="CSV should have a column with Instagram reel URLs (e.g., 'https://www.instagram.com/reel/ABC123/')",
+        key="csv_uploader"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            # Read CSV
+            df_uploaded = pd.read_csv(uploaded_file)
+            st.success(f"✅ CSV uploaded successfully! Found {len(df_uploaded)} rows.")
+            
+            # Find the column with reel links
+            reel_links = []
+            for col in df_uploaded.columns:
+                if df_uploaded[col].astype(str).str.contains('instagram.com/reel/', na=False).any():
+                    reel_links = df_uploaded[col].dropna().tolist()
+                    st.info(f"📊 Found reel links in column: '{col}'")
+                    break
+            
+            if not reel_links:
+                st.error("❌ No Instagram reel links found in the CSV. Please ensure your CSV contains URLs like 'https://www.instagram.com/reel/ABC123/'")
+            else:
+                st.write(f"🔗 Processing {len(reel_links)} reel links...")
+                
+                # Process the reel links
+                if st.button("Process CSV Reel Links", type="primary", key="process_csv"):
+                    if not cookie_header_global:
+                        st.error("Cookie header is required. Paste your Instagram Cookie header above.")
+                    else:
+                        with st.spinner("Processing CSV reel links..."):
+                            rows = []
+                            total = len(reel_links)
+                            prog = st.progress(0)
+                            table_ph = st.empty()
+                            
+                            for idx, link in enumerate(reel_links):
+                                try:
+                                    sc = extract_shortcode(link) or link
+                                    media_id = fetch_media_id_via_bulk_route(sc, cookie_header_global)
+                                    if not media_id:
+                                        rows.append({
+                                            "Reel Link": link,
+                                            "posted_on": "",
+                                            "caption": "",
+                                            "media_type": "",
+                                            "play_count": "",
+                                            "like_count": "",
+                                            "comment_count": "",
+                                            "status": "not found",
+                                        })
+                                        prog.progress(min((idx + 1) / total, 1.0))
+                                        continue
+                                    
+                                    ref = f"https://www.instagram.com/p/{sc}/"
+                                    try:
+                                        stats = fetch_media_stats_by_pk(media_id, cookie_header_global, referer_url=ref)
+                                    except Exception:
+                                        stats = {}
+                                    try:
+                                        cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
+                                    except Exception:
+                                        cap = ""
+                                    
+                                    rows.append({
+                                        "Reel Link": link,
+                                        "posted_on": stats.get("posted_on"),
+                                        "caption": cap,
+                                        "media_type": stats.get("product_type") or stats.get("media_type"),
+                                        "play_count": stats.get("play_count"),
+                                        "like_count": stats.get("like_count"),
+                                        "comment_count": stats.get("comment_count"),
+                                        "status": "ok",
+                                    })
+                                except Exception as e:
+                                    rows.append({
+                                        "Reel Link": link,
+                                        "posted_on": "",
+                                        "caption": "",
+                                        "media_type": "",
+                                        "play_count": "",
+                                        "like_count": "",
+                                        "comment_count": "",
+                                        "status": f"error: {type(e).__name__}",
+                                    })
+                                
+                                # Incremental render
+                                try:
+                                    df_inc = pd.DataFrame(rows)
+                                    table_ph.dataframe(df_inc, use_container_width=True, hide_index=True)
+                                except Exception:
+                                    table_ph.write(rows[-1])
+                                prog.progress(min((idx + 1) / total, 1.0))
+                            
+                            # Final render
+                            if rows:
+                                df_final = pd.DataFrame(rows)
+                                table_ph.dataframe(df_final, use_container_width=True, hide_index=True)
+                                
+                                # Download CSV
+                                csv_bytes = df_final.to_csv(index=False).encode("utf-8")
+                                st.download_button(
+                                    label="Download Results CSV",
+                                    data=csv_bytes,
+                                    file_name=f"instagram_reels_analysis_{len(rows)}.csv",
+                                    mime="text/csv"
+                                )
+        except Exception as e:
+            st.error(f"Error reading CSV: {e}")
+    
+    st.markdown("---")
+    st.markdown("**Option 2: Enter Reel Links Manually**")
+    
     batch_input = st.text_area(
         "Enter Shortcode(s) or Reel URL(s) (single or multiple, comma/newline separated)",
         placeholder="DQV2iwvDOgy\nhttps://www.instagram.com/reel/DPtN66QETYj/\nhttps://www.instagram.com/reel/XXXX/",

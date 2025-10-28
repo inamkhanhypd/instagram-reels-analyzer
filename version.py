@@ -1,7 +1,16 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 BUILD_DATE = "2025-01-28"
 CHANGELOG = {
+    "1.2.1": {
+        "date": "2025-01-28",
+        "changes": [
+            "Moved CSV upload functionality from Analyze Profile to Analyze Reels section",
+            "CSV upload now correctly placed in the reel analysis workflow",
+            "Maintained two options in Analyze Reels: CSV upload or manual input",
+            "Analyze Profile section now focuses solely on username-based analysis"
+        ]
+    },
     "1.2.0": {
         "date": "2025-01-28",
         "changes": [

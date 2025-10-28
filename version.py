@@ -1,7 +1,16 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 BUILD_DATE = "2025-01-28"
 CHANGELOG = {
+    "1.2.3": {
+        "date": "2025-01-28",
+        "changes": [
+            "Added development workflow with develop branch",
+            "Created DEVELOPMENT.md documentation",
+            "Set up proper branch strategy: develop → main → deploy",
+            "Improved development process and testing workflow"
+        ]
+    },
     "1.2.2": {
         "date": "2025-01-28",
         "changes": [

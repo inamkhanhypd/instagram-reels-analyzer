@@ -872,7 +872,7 @@ with tab_profile:
                                     df_final = pd.DataFrame(rows)
                                     table_ph.dataframe(df_final, use_container_width=True, hide_index=True)
 
-                            st.session_state["last_username"] = username_to_use
+                                st.session_state["last_username"] = username_to_use
 
                 except PermissionError:
                     st.error("Profile not found or private, or cookies expired.")

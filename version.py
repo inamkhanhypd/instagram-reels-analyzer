@@ -1,7 +1,18 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 BUILD_DATE = "2025-01-28"
 CHANGELOG = {
+    "1.2.0": {
+        "date": "2025-01-28",
+        "changes": [
+            "Changed shortcode display to show full reel links instead of clickable text",
+            "Added CSV upload functionality to Analyze Profile section",
+            "CSV upload automatically detects reel links in any column",
+            "Added incremental processing with progress bar for CSV uploads",
+            "Added download button for CSV analysis results",
+            "Improved user experience with two options: CSV upload or username analysis"
+        ]
+    },
     "1.1.0": {
         "date": "2025-01-28",
         "changes": [

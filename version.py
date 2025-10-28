@@ -1,7 +1,16 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 BUILD_DATE = "2025-01-28"
 CHANGELOG = {
+    "1.2.2": {
+        "date": "2025-01-28",
+        "changes": [
+            "Updated column names: play_count → Total Views, like_count → Total Likes, comment_count → Total Comments",
+            "Added 'Top 5 Media' text in Analyze Profile section for better clarity",
+            "Consistent column naming across both Analyze Profile and Analyze Reels sections",
+            "Improved user experience with clearer data labels"
+        ]
+    },
     "1.2.1": {
         "date": "2025-01-28",
         "changes": [

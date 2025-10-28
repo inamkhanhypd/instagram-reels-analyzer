@@ -584,7 +584,7 @@ def fetch_user_id_with_cookies(username: str, cookie_header: str) -> Optional[st
 def reels_to_dataframe(items: List[Dict[str, Any]]) -> pd.DataFrame:
     if not items:
         return pd.DataFrame(
-            columns=["Reel Link", "Posted On", "Caption", "Media Type", "Plays", "Likes", "Comments"]
+            columns=["Reel Link", "Posted On", "Caption", "Media Type", "Total Views", "Total Likes", "Total Comments"]
         )
 
     rows = []
@@ -599,9 +599,9 @@ def reels_to_dataframe(items: List[Dict[str, Any]]) -> pd.DataFrame:
                 "Posted On": to_yyyymmdd(it["taken_at_timestamp"]),
                 "Caption": it.get("caption", ""),
                 "Media Type": it.get("product_type", "reel"),
-                "Plays": it.get("video_view_count", 0),
-                "Likes": it["likes"],
-                "Comments": it["comments"],
+                "Total Views": it.get("video_view_count", 0),
+                "Total Likes": it["likes"],
+                "Total Comments": it["comments"],
                 "_sort_ts": it["taken_at_timestamp"].timestamp(),
             }
         )
@@ -610,9 +610,9 @@ def reels_to_dataframe(items: List[Dict[str, Any]]) -> pd.DataFrame:
     df = df.sort_values(by="_sort_ts", ascending=False).drop(columns=["_sort_ts"]).reset_index(drop=True)
 
     df_display = df.copy()
-    df_display["Likes"] = df_display["Likes"].apply(format_count)
-    df_display["Comments"] = df_display["Comments"].apply(format_count)
-    # Do NOT format Plays; show full exact number
+    df_display["Total Likes"] = df_display["Total Likes"].apply(format_count)
+    df_display["Total Comments"] = df_display["Total Comments"].apply(format_count)
+    # Do NOT format Total Views; show full exact number
 
     return df_display
 
@@ -657,6 +657,7 @@ tab_profile, tab_reels = st.tabs(["Analyze Profile", "Analyze Reels"])
 
 with tab_profile:
     st.subheader("Analyze Profile")
+    st.markdown("**Top 5 Media**")
     
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -812,9 +813,9 @@ with tab_profile:
                                                 "posted_on": "",
                                                 "caption": "",
                                                 "media_type": "",
-                                                "play_count": "",
-                                                "like_count": "",
-                                                "comment_count": "",
+                                                "Total Views": "",
+                                                "Total Likes": "",
+                                                "Total Comments": "",
                                                 "status": "not found",
                                             })
                                             prog.progress(min((idx + 1) / total, 1.0))
@@ -840,9 +841,9 @@ with tab_profile:
                                             "posted_on": stats.get("posted_on"),
                                             "caption": cap,
                                             "media_type": stats.get("product_type") or stats.get("media_type"),
-                                            "play_count": stats.get("play_count"),
-                                            "like_count": stats.get("like_count"),
-                                            "comment_count": stats.get("comment_count"),
+                                            "Total Views": stats.get("play_count"),
+                                            "Total Likes": stats.get("like_count"),
+                                            "Total Comments": stats.get("comment_count"),
                                             "status": "ok",
                                         })
                                     except Exception as e:
@@ -852,9 +853,9 @@ with tab_profile:
                                             "posted_on": "",
                                             "caption": "",
                                             "media_type": "",
-                                            "play_count": "",
-                                            "like_count": "",
-                                            "comment_count": "",
+                                            "Total Views": "",
+                                            "Total Likes": "",
+                                            "Total Comments": "",
                                             "status": f"error: {type(e).__name__}",
                                         })
 
@@ -938,9 +939,9 @@ with tab_reels:
                                             "posted_on": "",
                                             "caption": "",
                                             "media_type": "",
-                                            "play_count": "",
-                                            "like_count": "",
-                                            "comment_count": "",
+                                            "Total Views": "",
+                                            "Total Likes": "",
+                                            "Total Comments": "",
                                             "status": "not found",
                                         })
                                         prog.progress(min((idx + 1) / total, 1.0))
@@ -961,9 +962,9 @@ with tab_reels:
                                         "posted_on": stats.get("posted_on"),
                                         "caption": cap,
                                         "media_type": stats.get("product_type") or stats.get("media_type"),
-                                        "play_count": stats.get("play_count"),
-                                        "like_count": stats.get("like_count"),
-                                        "comment_count": stats.get("comment_count"),
+                                        "Total Views": stats.get("play_count"),
+                                        "Total Likes": stats.get("like_count"),
+                                        "Total Comments": stats.get("comment_count"),
                                         "status": "ok",
                                     })
                                 except Exception as e:
@@ -972,9 +973,9 @@ with tab_reels:
                                         "posted_on": "",
                                         "caption": "",
                                         "media_type": "",
-                                        "play_count": "",
-                                        "like_count": "",
-                                        "comment_count": "",
+                                        "Total Views": "",
+                                        "Total Likes": "",
+                                        "Total Comments": "",
                                         "status": f"error: {type(e).__name__}",
                                     })
                                 
@@ -1045,9 +1046,9 @@ with tab_reels:
                                 "posted_on": "",
                                 "caption": "",
                                 "media_type": "",
-                                "play_count": "",
-                                "like_count": "",
-                                "comment_count": "",
+                                "Total Views": "",
+                                "Total Likes": "",
+                                "Total Comments": "",
                                 "status": "not found",
                             })
                             try:
@@ -1088,9 +1089,9 @@ with tab_reels:
                             "posted_on": stats.get("posted_on"),
                             "caption": cap,
                             "media_type": stats.get("product_type") or stats.get("media_type"),
-                            "play_count": stats.get("play_count"),
-                            "like_count": stats.get("like_count"),
-                            "comment_count": stats.get("comment_count"),
+                            "Total Views": stats.get("play_count"),
+                            "Total Likes": stats.get("like_count"),
+                            "Total Comments": stats.get("comment_count"),
                             "status": "ok",
                         })
                     except Exception as e:
@@ -1099,9 +1100,9 @@ with tab_reels:
                             "posted_on": "",
                             "caption": "",
                             "media_type": "",
-                            "play_count": "",
-                            "like_count": "",
-                            "comment_count": "",
+                            "Total Views": "",
+                            "Total Likes": "",
+                            "Total Comments": "",
                             "status": f"error: {type(e).__name__}",
                         })
                     try:

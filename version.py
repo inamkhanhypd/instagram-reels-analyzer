@@ -1,7 +1,13 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 BUILD_DATE = "2025-10-30"
 CHANGELOG = {
+    "1.3.1": {
+        "date": "2025-10-30",
+        "changes": [
+            "Maintenance release to ship latest fixes and improvements"
+        ]
+    },
     "1.3.0": {
         "date": "2025-10-30",
         "changes": [

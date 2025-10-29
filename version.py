@@ -1,7 +1,29 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.2.2"
-BUILD_DATE = "2025-01-28"
+VERSION = "1.3.0"
+BUILD_DATE = "2025-10-30"
 CHANGELOG = {
+    "1.3.0": {
+        "date": "2025-10-30",
+        "changes": [
+            "Performance: shared HTTP session, bulk shortcode resolution, parallel stats fetching",
+            "Stability: robust fallbacks for media IDs and stats parsing",
+            "Analyze Profile: show total media, user-specified fetch count, explicit Process",
+            "Ordering: deterministic incremental rendering across all flows",
+            "Analyze Reels: persistent results + download button until cleared",
+            "Captions: always fetched again for all items",
+            "Deprecations fixed: timezone-aware datetime; width='stretch' for dataframe",
+            "Arrow compatibility: numeric coercion for counts"
+        ]
+    },
+    "1.2.3": {
+        "date": "2025-01-28",
+        "changes": [
+            "Added development workflow with develop branch",
+            "Created DEVELOPMENT.md documentation",
+            "Set up proper branch strategy: develop → main → deploy",
+            "Improved development process and testing workflow"
+        ]
+    },
     "1.2.2": {
         "date": "2025-01-28",
         "changes": [

@@ -438,10 +438,11 @@ def resolve_media_by_shortcode(
     if csrf:
         headers["x-csrftoken"] = csrf
 
-    # Try with provided referer (or /p/), then fallback to /reel/ if 404
+    # Prefer /reel/ referer first, then /p/ fallback
+    headers["referer"] = f"https://www.instagram.com/reel/{shortcode}/"
     resp = requests.get(url, headers=headers, timeout=20)
     if resp.status_code == 404:
-        headers["referer"] = f"https://www.instagram.com/reel/{shortcode}/"
+        headers["referer"] = f"https://www.instagram.com/p/{shortcode}/"
         resp = requests.get(url, headers=headers, timeout=20)
 
     # If still failing, try bulk-route-definitions resolver to get media_id
@@ -720,7 +721,16 @@ def resolve_media_id_with_fallback(shortcode: str, cookie_header: str) -> Option
             except Exception:
                 return str(mid)
     except Exception:
-        return None
+        pass
+    # Try oEmbed
+    mid = fetch_media_id_via_oembed(shortcode, cookie_header)
+    if mid:
+        return mid
+    # Try parsing the HTML page
+    mid = fetch_media_id_from_html(shortcode, cookie_header)
+    if mid:
+        return mid
+    return None
 
 # Extract stats from a media item payload as fallback
 def parse_stats_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -740,6 +750,61 @@ def parse_stats_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "product_type": item.get("product_type"),
         "media_type": item.get("media_type"),
     }
+
+# ----------------------------
+# Extra media_id fallbacks: oEmbed and HTML page parse
+# ----------------------------
+def fetch_media_id_via_oembed(shortcode: str, cookie_header: str) -> Optional[str]:
+    try:
+        url = f"https://www.instagram.com/oembed/?url=https://www.instagram.com/reel/{shortcode}/"
+        headers = {
+            "accept": "*/*",
+            "user-agent": "Mozilla/5.0",
+            "cookie": cookie_header,
+        }
+        resp = get_shared_session().get(url, headers=headers, timeout=20)
+        if not resp.ok:
+            return None
+        j = resp.json()
+        media_id = j.get("media_id") or j.get("id")
+        if media_id:
+            try:
+                return str(media_id).split("_")[0]
+            except Exception:
+                return str(media_id)
+        return None
+    except Exception:
+        return None
+
+def fetch_media_id_from_html(shortcode: str, cookie_header: str) -> Optional[str]:
+    try:
+        url = f"https://www.instagram.com/reel/{shortcode}/"
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "user-agent": "Mozilla/5.0",
+            "cookie": cookie_header,
+            "referer": f"https://www.instagram.com/reel/{shortcode}/",
+        }
+        resp = get_shared_session().get(url, headers=headers, timeout=20)
+        if not resp.ok:
+            # try /p/ variant
+            headers["referer"] = f"https://www.instagram.com/p/{shortcode}/"
+            resp = get_shared_session().get(f"https://www.instagram.com/p/{shortcode}/", headers=headers, timeout=20)
+            if not resp.ok:
+                return None
+        text = resp.text or ""
+        import re as _re
+        # Try media_id first
+        m = _re.search(r'"media_id"\s*:\s*"(\d+)"', text)
+        if m:
+            return m.group(1)
+        # Try id of form 1234_5678
+        m2 = _re.search(r'"id"\s*:\s*"(\d+)_\d+"', text)
+        if m2:
+            return m2.group(1)
+        return None
+    except Exception:
+        return None
 
 
 # ----------------------------
@@ -788,6 +853,8 @@ tab_profile, tab_reels = st.tabs(["Analyze Profile", "Analyze Reels"])
 
 with tab_profile:
     st.subheader("Analyze Profile")
+    fetch_captions_profile = st.checkbox("Fetch captions (slower)", value=False, key="profile_fetch_captions")
+    show_diag_profile = st.checkbox("Show diagnostics", value=False, key="profile_show_diag")
     
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -988,6 +1055,7 @@ with tab_profile:
                     def process_one(i: int) -> Dict[str, Any]:
                         sc = shortcodes[i]
                         media_id = id_map.get(sc)
+                        resolver_used = "bulk"
                         if not media_id:
                             media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
                             if not media_id:
@@ -999,7 +1067,8 @@ with tab_profile:
                                     "Total Views": 0,
                                     "Total Likes": 0,
                                     "Total Comments": 0,
-                                    "status": "not found",
+                                                "status": "not found",
+                                                "diag": "resolver=none",
                                 }
                         ref = f"https://www.instagram.com/p/{sc}/"
                         try:
@@ -1010,13 +1079,15 @@ with tab_profile:
                             try:
                                 item = resolve_media_by_shortcode(sc, cookie_header_global)
                                 stats = parse_stats_from_item(item)
+                                resolver_used = resolver_used + "+shortcode"
                             except Exception:
                                 stats = {}
-                        # Always fetch caption
-                        try:
-                            cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
-                        except Exception:
-                            cap = ""
+                        cap = ""
+                        if fetch_captions_profile:
+                            try:
+                                cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
+                            except Exception:
+                                cap = ""
                         shortcode_out = (stats.get("shortcode") if stats else None) or sc
                         return {
                             "Reel Link": f"https://www.instagram.com/reel/{shortcode_out}/" if shortcode_out else "",
@@ -1027,6 +1098,7 @@ with tab_profile:
                             "Total Likes": stats.get("like_count") if stats else 0,
                             "Total Comments": stats.get("comment_count") if stats else 0,
                             "status": "ok" if stats else "partial",
+                            "diag": f"resolver={resolver_used}; stats={'ok' if stats else 'empty'}; captions={'on' if fetch_captions_profile and cap else 'off'}" if show_diag_profile else "",
                         }
 
                     completed = 0
@@ -1117,7 +1189,9 @@ with tab_reels:
             else:
                 st.write(f"🔗 Processing {len(reel_links)} reel links...")
                 
-                # Process the reel links
+                # Captions toggle and process button
+                fetch_captions_csv = st.checkbox("Fetch captions (slower)", value=False, key="csv_fetch_captions")
+                show_diag_csv = st.checkbox("Show diagnostics", value=False, key="csv_show_diag")
                 if st.button("Process CSV Reel Links", type="primary", key="process_csv"):
                     if not cookie_header_global:
                         st.error("Cookie header is required. Paste your Instagram Cookie header above.")
@@ -1139,12 +1213,13 @@ with tab_reels:
                             id_map = bulk_fetch_media_ids(shortcodes, cookie_header_global)
 
                             from concurrent.futures import ThreadPoolExecutor, as_completed
-                            max_workers = min(8, max(2, len(reel_links)))
+                            max_workers = 8
 
                             def process_one(i: int) -> Dict[str, Any]:
                                 link = reel_links[i]
                                 sc = shortcodes[i]
                                 media_id = id_map.get(sc)
+                                resolver_used = "bulk"
                                 if not media_id:
                                     media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
                                     if not media_id:
@@ -1157,6 +1232,7 @@ with tab_reels:
                                             "Total Likes": 0,
                                             "Total Comments": 0,
                                             "status": "not found",
+                                            "diag": "resolver=none" if show_diag_csv else "",
                                         }
                                 ref = f"https://www.instagram.com/p/{sc}/"
                                 try:
@@ -1168,13 +1244,15 @@ with tab_reels:
                                     try:
                                         item = resolve_media_by_shortcode(sc, cookie_header_global)
                                         stats = parse_stats_from_item(item)
+                                        resolver_used = resolver_used + "+shortcode"
                                     except Exception:
                                         stats = {}
-                                # Always fetch caption
-                                try:
-                                    cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
-                                except Exception:
-                                    cap = ""
+                                cap = ""
+                                if fetch_captions_csv:
+                                    try:
+                                        cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
+                                    except Exception:
+                                        cap = ""
                                 return {
                                     "Reel Link": link,
                                     "posted_on": stats.get("posted_on") if stats else "",
@@ -1184,6 +1262,7 @@ with tab_reels:
                                     "Total Likes": stats.get("like_count") if stats else 0,
                                     "Total Comments": stats.get("comment_count") if stats else 0,
                                     "status": "ok" if stats else "partial",
+                                    "diag": (f"resolver={resolver_used}; stats={'ok' if stats else 'empty'}; captions={'on' if fetch_captions_csv and cap else 'off'}") if show_diag_csv else "",
                                 }
 
                             completed = 0
@@ -1207,7 +1286,7 @@ with tab_reels:
                                         }
                                     rows_by_index[idx] = res
                                     completed += 1
-                                    if completed % 5 == 0 or completed == total:
+                                    if completed % 50 == 0 or completed == total:
                                         try:
                                             ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
                                             df_inc = _ensure_arrow_safe(pd.DataFrame(ordered))
@@ -1258,6 +1337,10 @@ with tab_reels:
         height=100,
         key="batch_input",
     ).strip()
+    # Pre-run options (must be before clicking Fetch)
+    fetch_captions_manual_opt = st.checkbox("Fetch captions (slower)", value=False, key="manual_fetch_captions")
+    show_diag_manual_opt = st.checkbox("Show diagnostics", value=False, key="manual_show_diag")
+    
     col_b1, col_b2 = st.columns([1,1])
     with col_b1:
         start_batch = st.button("Fetch", type="primary", key="batch_fetch")
@@ -1293,11 +1376,12 @@ with tab_reels:
                 id_map = bulk_fetch_media_ids(shortcodes, cookie_header_global)
 
                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                max_workers = min(8, max(2, len(tokens)))
+                max_workers = 8
                 def process_one(i: int) -> Dict[str, Any]:
                     token = tokens[i]
                     sc = shortcodes[i]
                     media_id = id_map.get(sc)
+                    resolver_used = "bulk"
                     if not media_id:
                         media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
                         if not media_id:
@@ -1310,6 +1394,7 @@ with tab_reels:
                                 "Total Likes": 0,
                                 "Total Comments": 0,
                                 "status": "not found",
+                                "diag": "resolver=none" if show_diag_manual_opt else "",
                             }
                     ref = f"https://www.instagram.com/p/{sc}/"
                     try:
@@ -1324,17 +1409,19 @@ with tab_reels:
                         try:
                             item = resolve_media_by_shortcode(sc, cookie_header_global)
                             stats = parse_stats_from_item(item)
+                            resolver_used = resolver_used + "+shortcode"
                         except Exception:
                             stats = {}
-                    # Always fetch caption
-                    try:
-                        cap = fetch_caption_by_media_pk(
-                            media_id,
-                            cookie_header_global,
-                            referer_url=ref,
-                        ) or ""
-                    except Exception:
-                        cap = ""
+                    cap = ""
+                    if fetch_captions_manual_opt:
+                        try:
+                            cap = fetch_caption_by_media_pk(
+                                media_id,
+                                cookie_header_global,
+                                referer_url=ref,
+                            ) or ""
+                        except Exception:
+                            cap = ""
                     shortcode = (stats.get("shortcode") if stats else None) or sc
                     return {
                         "Reel Link": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else "",
@@ -1345,6 +1432,7 @@ with tab_reels:
                         "Total Likes": stats.get("like_count") if stats else 0,
                         "Total Comments": stats.get("comment_count") if stats else 0,
                         "status": "ok" if stats else "partial",
+                        "diag": (f"resolver={resolver_used}; stats={'ok' if stats else 'empty'}; captions={'on' if fetch_captions_manual_opt and cap else 'off'}") if show_diag_manual_opt else "",
                     }
 
                 completed = 0
@@ -1368,7 +1456,7 @@ with tab_reels:
                             }
                         rows_by_index[idx] = res
                         completed += 1
-                        if completed % 5 == 0 or completed == total:
+                        if completed % 50 == 0 or completed == total:
                             try:
                                 ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
                                 df_inc = _ensure_arrow_safe(pd.DataFrame(ordered))

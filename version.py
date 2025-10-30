@@ -1,11 +1,18 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 BUILD_DATE = "2025-10-30"
 CHANGELOG = {
     "1.3.1": {
         "date": "2025-10-30",
         "changes": [
             "Maintenance release to ship latest fixes and improvements"
+        ]
+    },
+    "1.3.3": {
+        "date": "2025-10-30",
+        "changes": [
+            "CSV: Added batch size and pause-between-batches controls (10–20s recommended)",
+            "CSV: Internal batching with per-batch ID resolution and progress"
         ]
     },
     "1.3.2": {

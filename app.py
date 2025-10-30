@@ -3,6 +3,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
+import os
 from typing import List, Dict, Any, Optional
 
 import time
@@ -96,11 +97,17 @@ def get_shared_session() -> requests.Session:
     return sess
 def extract_shortcode(reel_url: str) -> Optional[str]:
     try:
-        # Accept forms like https://www.instagram.com/reel/<shortcode>/
-        # or https://www.instagram.com/p/<shortcode>/ with optional trailing parts
+        # Accept forms like https://www.instagram.com/reel/<shortcode>/ or /p/<shortcode>/
+        # Normalize and strip trailing punctuation/copy artifacts
         import re
-        m = re.search(r"/(?:reel|p)/([A-Za-z0-9_-]+)/?", reel_url)
-        return m.group(1) if m else None
+        text = (reel_url or "").strip()
+        m = re.search(r"/(?:reel|p)/([A-Za-z0-9_]+)/?", text)
+        code = m.group(1) if m else None
+        if not code:
+            return None
+        # Safety: allow only instagram shortcode charset (alnum + underscore); strip any extras
+        code = re.sub(r"[^A-Za-z0-9_]", "", code)
+        return code or None
     except Exception:
         return None
 
@@ -676,6 +683,12 @@ def bulk_fetch_media_ids(shortcodes: List[str], cookie_header: str, batch_size: 
             "dpr": "2",
         }
         for idx, sc in enumerate(chunk):
+            # sanitize again defensively
+            try:
+                import re as _re
+                sc = _re.sub(r"[^A-Za-z0-9_]", "", sc or "")
+            except Exception:
+                pass
             data[f"route_urls[{idx}]"] = f"/reel/{sc}/"
         try:
             resp = sess.post("https://www.instagram.com/ajax/bulk-route-definitions/", headers=headers, data=data, timeout=20)
@@ -854,7 +867,21 @@ tab_profile, tab_reels = st.tabs(["Analyze Profile", "Analyze Reels"])
 with tab_profile:
     st.subheader("Analyze Profile")
     fetch_captions_profile = st.checkbox("Fetch captions (slower)", value=False, key="profile_fetch_captions")
-    show_diag_profile = st.checkbox("Show diagnostics", value=False, key="profile_show_diag")
+    # Hide diagnostics in production (safe even if no secrets)
+    def _is_prod() -> bool:
+        env_from_os = (os.getenv("ENV") or os.getenv("STREAMLIT_ENV") or "").lower()
+        if env_from_os == "prod":
+            return True
+        try:
+            env_from_secrets = str(getattr(st, "secrets", {}).get("ENV", "")).lower()
+        except Exception:
+            env_from_secrets = ""
+        return env_from_secrets == "prod"
+    IS_PROD = _is_prod()
+    if not IS_PROD:
+        show_diag_profile = st.checkbox("Show diagnostics", value=False, key="profile_show_diag")
+    else:
+        show_diag_profile = False
     
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -1189,9 +1216,19 @@ with tab_reels:
             else:
                 st.write(f"🔗 Processing {len(reel_links)} reel links...")
                 
-                # Captions toggle and process button
+                # Batch controls for large CSVs
+                cfg1, cfg2 = st.columns([1,1])
+                with cfg1:
+                    csv_batch_size = st.number_input("Batch size", min_value=50, max_value=2000, step=50, value=300, key="csv_batch_size")
+                with cfg2:
+                    csv_pause_secs = st.number_input("Pause secs between batches", min_value=0, max_value=120, step=5, value=15, key="csv_pause_secs")
+
+                # Captions toggle and diagnostics (hidden on prod)
                 fetch_captions_csv = st.checkbox("Fetch captions (slower)", value=False, key="csv_fetch_captions")
-                show_diag_csv = st.checkbox("Show diagnostics", value=False, key="csv_show_diag")
+                if not IS_PROD:
+                    show_diag_csv = st.checkbox("Show diagnostics", value=False, key="csv_show_diag")
+                else:
+                    show_diag_csv = False
                 if st.button("Process CSV Reel Links", type="primary", key="process_csv"):
                     if not cookie_header_global:
                         st.error("Cookie header is required. Paste your Instagram Cookie header above.")
@@ -1208,17 +1245,15 @@ with tab_reels:
                                         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
                                 return df
                             
-                            # Resolve IDs in batches
+                            # Prepare shortcodes and process in batches
                             shortcodes = [extract_shortcode(link) or link for link in reel_links]
-                            id_map = bulk_fetch_media_ids(shortcodes, cookie_header_global)
-
                             from concurrent.futures import ThreadPoolExecutor, as_completed
                             max_workers = 8
 
-                            def process_one(i: int) -> Dict[str, Any]:
+                            def process_one_global(i: int, id_map_batch: Dict[str, Optional[str]]) -> Dict[str, Any]:
                                 link = reel_links[i]
                                 sc = shortcodes[i]
-                                media_id = id_map.get(sc)
+                                media_id = id_map_batch.get(sc)
                                 resolver_used = "bulk"
                                 if not media_id:
                                     media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
@@ -1267,33 +1302,42 @@ with tab_reels:
 
                             completed = 0
                             rows_by_index: Dict[int, Dict[str, Any]] = {}
-                            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                                futures_map = {ex.submit(process_one, i): i for i in range(total)}
-                                for fut in as_completed(futures_map):
-                                    idx = futures_map[fut]
-                                    try:
-                                        res = fut.result()
-                                    except Exception as e:
-                                        res = {
-                                            "Reel Link": "",
-                                            "posted_on": "",
-                                            "caption": "",
-                                            "media_type": "",
-                                            "Total Views": 0,
-                                            "Total Likes": 0,
-                                            "Total Comments": 0,
-                                            "status": f"error: {type(e).__name__}",
-                                        }
-                                    rows_by_index[idx] = res
-                                    completed += 1
-                                    if completed % 50 == 0 or completed == total:
+
+                            for start_i in range(0, total, int(csv_batch_size)):
+                                end_i = min(start_i + int(csv_batch_size), total)
+                                batch_indices = list(range(start_i, end_i))
+                                # Resolve IDs for this batch only
+                                id_map_batch = bulk_fetch_media_ids([shortcodes[i] for i in batch_indices], cookie_header_global)
+                                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                                    futures_map = {ex.submit(process_one_global, i, id_map_batch): i for i in batch_indices}
+                                    for fut in as_completed(futures_map):
+                                        idx = futures_map[fut]
                                         try:
-                                            ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
-                                            df_inc = _ensure_arrow_safe(pd.DataFrame(ordered))
-                                            table_ph.dataframe(df_inc, width="stretch", hide_index=True)
-                                        except Exception:
-                                            pass
-                                        prog.progress(min(completed / total, 1.0))
+                                            res = fut.result()
+                                        except Exception as e:
+                                            res = {
+                                                "Reel Link": "",
+                                                "posted_on": "",
+                                                "caption": "",
+                                                "media_type": "",
+                                                "Total Views": 0,
+                                                "Total Likes": 0,
+                                                "Total Comments": 0,
+                                                "status": f"error: {type(e).__name__}",
+                                            }
+                                        rows_by_index[idx] = res
+                                        completed += 1
+                                        if completed % 50 == 0 or completed == total:
+                                            try:
+                                                ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
+                                                df_inc = _ensure_arrow_safe(pd.DataFrame(ordered))
+                                                table_ph.dataframe(df_inc, width="stretch", hide_index=True)
+                                            except Exception:
+                                                pass
+                                            prog.progress(min(completed / total, 1.0))
+                                # Optional pause between batches to mitigate rate-limits
+                                if end_i < total and int(csv_pause_secs) > 0:
+                                    time.sleep(int(csv_pause_secs))
                             
                             # Final render
                             if rows_by_index:
@@ -1339,7 +1383,10 @@ with tab_reels:
     ).strip()
     # Pre-run options (must be before clicking Fetch)
     fetch_captions_manual_opt = st.checkbox("Fetch captions (slower)", value=False, key="manual_fetch_captions")
-    show_diag_manual_opt = st.checkbox("Show diagnostics", value=False, key="manual_show_diag")
+    if not IS_PROD:
+        show_diag_manual_opt = st.checkbox("Show diagnostics", value=False, key="manual_show_diag")
+    else:
+        show_diag_manual_opt = False
     
     col_b1, col_b2 = st.columns([1,1])
     with col_b1:

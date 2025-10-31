@@ -9,6 +9,8 @@ from typing import List, Dict, Any, Optional
 import time
 import requests
 import json
+import random
+import string
 from version import get_version_info
 
 # ----------------------------
@@ -128,16 +130,17 @@ def fetch_play_count_with_cookies(reel_url: str, cookie_header: str) -> Optional
             return None
         return None
 
-    csrf = _extract_cookie_value(cookie_header, "csrftoken")
+    csrf = _extract_cookie_value(cookie_header, "csrftoken") if cookie_header else None
 
     headers = {
         "x-ig-app-id": "936619743392459",
         "x-requested-with": "XMLHttpRequest",
-        "user-agent": "Mozilla/5.0",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
         "referer": f"https://www.instagram.com/reel/{shortcode}/",
-        "cookie": cookie_header,
         "accept": "*/*",
     }
+    if cookie_header:
+        headers["cookie"] = cookie_header
     if csrf:
         headers["x-csrftoken"] = csrf
     # Throttle: ensure at least 20s between cookie-based calls
@@ -174,16 +177,63 @@ def fetch_play_count_with_cookies(reel_url: str, cookie_header: str) -> Optional
     )
 
 # ----------------------------
+# Fetch CSRF token from Instagram homepage (public, no auth needed)
+# ----------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_csrf_token_from_homepage() -> Optional[str]:
+    """Fetch CSRF token from Instagram's homepage HTML. This is publicly accessible."""
+    try:
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        }
+        # Use a fresh session to avoid any stale cookies or state
+        fresh_session = requests.Session()
+        resp = fresh_session.get("https://www.instagram.com/", headers=headers, timeout=10)
+        if resp.ok:
+            # Extract CSRF token from HTML - it's usually in a script tag or meta tag
+            import re
+            # Look for csrftoken in cookies first
+            cookies = resp.cookies
+            if "csrftoken" in cookies:
+                return cookies["csrftoken"]
+            # Or extract from HTML content
+            text = resp.text
+            # Try multiple patterns for csrf_token
+            patterns = [
+                r'"csrf_token"\s*:\s*"([^"]+)"',
+                r'{"config":\{[^}]*"csrf_token"\s*:\s*"([^"]+)"',
+                r'"_csrf_token"\s*:\s*"([^"]+)"',
+                r'X-CSRFToken["\']\s*[:=]\s*["\']([^"\']+)',
+            ]
+            for pattern in patterns:
+                m = re.search(pattern, text)
+                if m:
+                    token = m.group(1)
+                    # Validate it looks like a token (alphanumeric and reasonably long)
+                    if len(token) >= 10 and len(token) <= 50:
+                        return token
+    except Exception:
+        pass
+    return None
+
+# ----------------------------
 # GraphQL: Profile Reels tab (per your cURL)
 # ----------------------------
-def fetch_profile_reels_graphql(
-    cookie_header: str,
+def fetch_profile_reels_public(
     target_user_id: str,
     page_size: int = 12,
-    doc_id: str = "24127588873492897",
-    lsd: str = "76QeIqTETcgEMdD0A-57NO",
+    max_id: Optional[str] = None,
     referer: str = "https://www.instagram.com/",
+    cookie_header: Optional[str] = None,
+    _cache_buster: Optional[str] = None,  # Add timestamp to prevent caching
 ) -> Dict[str, Any]:
+    """Fetch profile reels via clips/user endpoint. CSRF token is fetched automatically if not provided.
+
+    Returns the JSON dict which typically includes an "items" list with media objects under "media".
+    Note: This function does NOT cache to ensure fresh data on every call.
+    """
     def _extract_cookie_value(cookie_str: str, key: str) -> Optional[str]:
         try:
             parts = [p.strip() for p in cookie_str.split(';')]
@@ -194,57 +244,78 @@ def fetch_profile_reels_graphql(
             return None
         return None
 
-    csrf = _extract_cookie_value(cookie_header, "csrftoken")
-
-    variables = {
-        "data": {
-            "include_feed_video": True,
-            "page_size": int(page_size),
-            "target_user_id": str(target_user_id),
-        }
-    }
-
     headers = {
         "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
         "content-type": "application/x-www-form-urlencoded",
-        "user-agent": "Mozilla/5.0",
-        "x-ig-app-id": "936619743392459",
-        "x-fb-lsd": lsd,
         "origin": "https://www.instagram.com",
         "referer": referer,
-        "cookie": cookie_header,
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "x-asbd-id": "359341",
+        "x-ig-app-id": "936619743392459",
+        "x-ig-www-claim": "0",
+        "x-instagram-ajax": "1029208420",
+        "x-requested-with": "XMLHttpRequest",
     }
-    if csrf:
-        headers["x-csrftoken"] = csrf
-
+    
+    # Extract or fetch CSRF token
+    csrf_token = None
+    if cookie_header:
+        headers["cookie"] = cookie_header
+        csrf_token = _extract_cookie_value(cookie_header, "csrftoken")
+    
+    # If no CSRF token from cookies, fetch it from Instagram homepage
+    if not csrf_token:
+        csrf_token = fetch_csrf_token_from_homepage()
+    
+    if csrf_token:
+        headers["x-csrftoken"] = csrf_token
+    
+    # Generate a random jazoest value (Instagram sometimes requires this)
+    jazoest = ''.join(random.choices(string.digits, k=5))
     data = {
-        "doc_id": doc_id,
-        "variables": json.dumps(variables, separators=(",", ":")),
+        "include_feed_video": "true",
+        "page_size": str(int(page_size)),
+        "target_user_id": str(target_user_id),
+        "jazoest": jazoest,
     }
+    if max_id:
+        data["max_id"] = str(max_id)
 
-    # Throttle: ensure at least 20s between GraphQL calls
-    min_interval = 20
+    # Throttle requests to be conservative
+    min_interval = 5
     now = time.time()
-    last_ts = st.session_state.get("last_graphql_call_ts", 0)
+    last_ts = st.session_state.get("last_public_reels_call_ts", 0)
     if now - last_ts < min_interval:
         time.sleep(min_interval - (now - last_ts))
 
-    # Exponential backoff on 429
-    backoffs = [1.5, 3.0, 6.0]
-    for i, wait_s in enumerate([0.0] + backoffs):
+    for i, wait_s in enumerate([0.0, 1.0, 2.0]):
         if wait_s:
             time.sleep(wait_s)
-        resp = requests.post("https://www.instagram.com/graphql/query", headers=headers, data=data, timeout=20)
-        if resp.status_code == 429 and i < len(backoffs):
-            continue
-        break
+        resp = requests.post("https://www.instagram.com/api/v1/clips/user/", headers=headers, data=data, timeout=20)
+        if resp.status_code != 429 or i == 2:
+            break
 
-    st.session_state["last_graphql_call_ts"] = time.time()
-
-    if resp.status_code in (401, 403):
-        raise PermissionError("Unauthorized or cookies expired")
+    st.session_state["last_public_reels_call_ts"] = time.time()
+    
+    # Debug logging for troubleshooting
+    if resp.status_code != 200:
+        import json as json_module
+        try:
+            error_body = resp.json()
+        except:
+            error_body = resp.text[:500]
+    
+    if resp.status_code == 403:
+        error_msg = resp.text[:500]
+        if "CSRF" in error_msg or "csrf" in error_msg.lower():
+            raise PermissionError(f"CSRF token issue (403). Failed to fetch valid CSRF token. CSRF token used: {csrf_token[:20] if csrf_token else 'None'}... Response: {error_msg}")
+        raise PermissionError(f"Access denied (403). Profile may be private or request was blocked. Response: {error_msg}")
     if resp.status_code == 429:
         raise ConnectionError("Rate limited (429)")
+    if not resp.ok:
+        error_msg = resp.text[:500]
+        raise PermissionError(f"Request failed with status {resp.status_code}. Response: {error_msg}")
     resp.raise_for_status()
     return resp.json()
 
@@ -511,6 +582,502 @@ def resolve_media_by_shortcode(
     return (data.get("items") or [None])[0] or data
 
 # ----------------------------
+# Fetch media stats via GraphQL for unauthenticated requests
+# Uses bulk-route-definitions to get media_id and owner_id, then GraphQL to get video_view_count
+# ----------------------------
+def fetch_reel_stats_via_graphql(
+    shortcode: str,
+    cookie_header: str = "",
+    debug: bool = False,
+) -> Dict[str, Any]:
+    """Fetch reel stats (play_count, likes, comments) for unauthenticated requests.
+    
+    Flow:
+    1. Call bulk-route-definitions to get media_id and owner_id
+    2. Call graphql/query with owner_id to get user's reels
+    3. Match media_id in GraphQL response to get video_view_count
+    
+    Returns dict with play_count, like_count, comment_count, shortcode, posted_on, etc.
+    If debug=True, also includes '_debug' key with diagnostic info.
+    """
+    debug_info = []
+    
+    def debug_log(msg: str):
+        if debug:
+            debug_info.append(msg)
+            print(msg)  # Also print for terminal
+    
+    try:
+        # Step 1: Get media_id and owner_id from bulk-route-definitions
+        # For unauthenticated requests, we need more complete headers to mimic a real browser
+        headers_bulk = {
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": "https://www.instagram.com",
+            "referer": f"https://www.instagram.com/reel/{shortcode}/",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+            "x-ig-d": "www",
+            "x-ig-app-id": "936619743392459",
+            "x-requested-with": "XMLHttpRequest",
+            "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        }
+        # Get basic cookies if not provided (Instagram requires at least csrftoken, datr, ig_did even for public content)
+        cookie_string = cookie_header
+        lsd_token = None
+        if not cookie_string:
+            # Fetch basic cookies from Instagram homepage - use a fresh session to avoid stale cookies
+            try:
+                # Create a fresh session for the homepage request to ensure we get fresh cookies
+                fresh_session = requests.Session()
+                homepage_resp = fresh_session.get(
+                    "https://www.instagram.com/",
+                    headers={
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "accept-language": "en-US,en;q=0.9",
+                        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+                    },
+                    timeout=10,
+                )
+                if homepage_resp.ok:
+                    cookies_dict = {}
+                    for cookie in homepage_resp.cookies:
+                        cookies_dict[cookie.name] = cookie.value
+                    debug_log(f"Homepage response - total cookies received: {len(cookies_dict)}, cookie names: {list(cookies_dict.keys())}")
+                    # Build cookie string from basic cookies Instagram sets
+                    cookie_parts = []
+                    for key in ["csrftoken", "datr", "ig_did", "ig_nrcb", "mid"]:
+                        if key in cookies_dict:
+                            cookie_parts.append(f"{key}={cookies_dict[key]}")
+                    if cookie_parts:
+                        cookie_string = "; ".join(cookie_parts)
+                        debug_log(f"Fetched basic cookies: {', '.join([key for key in cookies_dict.keys() if key in ['csrftoken', 'datr', 'ig_did', 'ig_nrcb', 'mid']])}")
+                        # Log actual cookie values for debugging (truncated)
+                        for key in ["csrftoken", "datr", "ig_did", "ig_nrcb", "mid"]:
+                            if key in cookies_dict:
+                                debug_log(f"Cookie {key}: {cookies_dict[key][:10]}...")
+                    else:
+                        debug_log(f"⚠️ No expected cookies found! All cookies from homepage: {list(cookies_dict.keys())}")
+                    
+                    # Extract lsd token and other tokens from HTML (needed for x-fb-lsd header)
+                    import re
+                    html_text = homepage_resp.text
+                    # Pattern: "LSD",[],{"token":"..."}
+                    lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"', html_text)
+                    if not lsd_match:
+                        # Try alternative pattern
+                        lsd_match = re.search(r'"lsd":"([^"]+)"', html_text)
+                    if lsd_match:
+                        lsd_token = lsd_match.group(1)
+                        debug_log(f"Extracted lsd token: {lsd_token[:20]}...")
+                    
+                    # Also try to extract csrftoken from HTML since we're not getting cookies
+                    # Pattern: "csrf_token":"..." or "X-CSRFToken":"..."
+                    csrf_html_match = re.search(r'["\']csrf_token["\']\s*:\s*["\']([^"\']+)["\']', html_text)
+                    if csrf_html_match:
+                        csrf_from_html = csrf_html_match.group(1)
+                        if not cookie_string:
+                            cookie_string = f"csrftoken={csrf_from_html}"
+                            debug_log(f"Extracted csrftoken from HTML: {csrf_from_html[:20]}...")
+                        elif "csrftoken" not in cookie_string:
+                            cookie_string += f"; csrftoken={csrf_from_html}"
+                            debug_log(f"Added csrftoken from HTML to cookie string")
+            except Exception as e:
+                debug_log(f"Failed to fetch basic cookies: {e}")
+        
+        if cookie_string:
+            headers_bulk["cookie"] = cookie_string
+            # Add lsd token to headers if we have it
+            if lsd_token:
+                headers_bulk["x-fb-lsd"] = lsd_token
+            # Extract CSRF token from cookies for x-csrftoken header
+            def _extract_cookie_value(cookie_str: str, key: str) -> Optional[str]:
+                try:
+                    parts = [p.strip() for p in cookie_str.split(';')]
+                    for p in parts:
+                        if p.startswith(key + "="):
+                            return p.split('=', 1)[1]
+                except Exception:
+                    return None
+                return None
+            csrf_from_cookie = _extract_cookie_value(cookie_string, "csrftoken")
+            if csrf_from_cookie:
+                headers_bulk["x-csrftoken"] = csrf_from_cookie
+        
+        # Build minimal payload (Instagram accepts minimal fields for unauthenticated requests)
+        import urllib.parse
+        # For unauthenticated requests, try the full path format that matches the response
+        # The request can be /reel/{shortcode}/ but response key might be /{username}/reel/{shortcode}/
+        route_path = f"/reel/{shortcode}/"
+        
+        data_bulk = {
+            "route_urls[0]": route_path,
+            "routing_namespace": "igx_www$a$87a091182d5bd65bcb043a2888004e09",
+            "__d": "www",
+            "__user": "0",
+            "__a": "1",
+            "__req": "8",
+            "dpr": "2",
+        }
+        
+        # Add lsd to data payload if we have it
+        if lsd_token:
+            data_bulk["lsd"] = lsd_token
+            debug_log(f"Added lsd to data payload")
+        
+        resp_bulk = get_shared_session().post(
+            "https://www.instagram.com/ajax/bulk-route-definitions/",
+            headers=headers_bulk,
+            data=data_bulk,
+            timeout=20,
+        )
+        
+        if not resp_bulk.ok:
+            error_msg = f"Bulk route failed: {resp_bulk.status_code} - {resp_bulk.text[:200]}"
+            debug_log(error_msg)
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
+        text_bulk = resp_bulk.text
+        
+        # Check if response is HTML (Instagram returned a login page or error)
+        if text_bulk.strip().startswith("<!DOCTYPE") or text_bulk.strip().startswith("<html"):
+            error_msg = f"Bulk route returned HTML instead of JSON (status {resp_bulk.status_code}). Instagram may be blocking the request."
+            debug_log(error_msg)
+            debug_log(f"Response headers: {dict(resp_bulk.headers)}")
+            # Try to extract error message from HTML
+            import re
+            html_error_match = re.search(r'<title>([^<]+)</title>', text_bulk)
+            if html_error_match:
+                error_msg += f" HTML Title: {html_error_match.group(1)}"
+            # Check if it's a login redirect
+            if "Please log in" in text_bulk or "login" in text_bulk.lower():
+                error_msg += " - Appears to be a login redirect."
+            debug_log(f"Full HTML preview (first 1000 chars): {text_bulk[:1000]}")
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
+        if text_bulk.startswith("for (;;);"):
+            text_bulk = text_bulk[len("for (;;);"):]
+        
+        try:
+            j_bulk = json.loads(text_bulk)
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON decode error: {e}, text: {text_bulk[:500]}"
+            debug_log(error_msg)
+            # Check if it's still HTML
+            if text_bulk.strip().startswith("<!DOCTYPE") or text_bulk.strip().startswith("<html"):
+                error_msg = f"Response is HTML, not JSON. Instagram may require authentication. Status: {resp_bulk.status_code}"
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
+        # Parse the response structure: payload.payloads[route_key].result.exports.rootView.props
+        # The route_key might be /reel/{shortcode}/ or /{username}/reel/{shortcode}/
+        payload = j_bulk.get("payload") or {}
+        payloads = payload.get("payloads") or {}
+        
+        # Try exact match first
+        route_obj = payloads.get(route_path) or {}
+        
+        # If not found, try any key that contains the shortcode (in case username was added)
+        found_route_key = route_path
+        if not route_obj:
+            for key in payloads.keys():
+                if shortcode in key and ("reel" in key or "post" in key):
+                    route_obj = payloads.get(key) or {}
+                    found_route_key = key
+                    debug_log(f"Found route key: {key} (was looking for: {route_path})")
+                    break
+        else:
+            debug_log(f"Using exact route key match: {route_path}")
+        
+        # Handle both possible structures - try multiple paths
+        result = route_obj.get("result") or {}
+        
+        # Path 1: result.exports.rootView.props
+        exports = result.get("exports") or {}
+        root_view = exports.get("rootView") or {}
+        props = root_view.get("props") or {}
+        
+        media_id = props.get("media_id")
+        owner_id = props.get("owner_id")
+        
+        # Path 2: Try direct result.props if Path 1 didn't work
+        if not media_id or not owner_id:
+            props_direct = result.get("props") or {}
+            if not media_id:
+                media_id = props_direct.get("media_id")
+            if not owner_id:
+                owner_id = props_direct.get("owner_id")
+        
+        # Path 3: Try result.rootView.props (without exports)
+        if not media_id or not owner_id:
+            root_view_direct = result.get("rootView") or {}
+            props_root = root_view_direct.get("props") or {}
+            if not media_id:
+                media_id = props_root.get("media_id")
+            if not owner_id:
+                owner_id = props_root.get("owner_id")
+        
+        debug_log(f"Bulk route response - media_id: {media_id}, owner_id: {owner_id}")
+        debug_log(f"Route path used: {route_path}")
+        debug_log(f"Found route key: {found_route_key}")
+        debug_log(f"Available payload keys: {list(payloads.keys())}")
+        debug_log(f"Route_obj keys: {list(route_obj.keys())}")
+        debug_log(f"Result keys: {list(result.keys())}")
+        if exports:
+            debug_log(f"Exports keys: {list(exports.keys())}")
+        if root_view:
+            debug_log(f"RootView keys: {list(root_view.keys())}")
+        if props:
+            debug_log(f"Props keys: {list(props.keys())}")
+        
+        if not media_id or not owner_id:
+            # Try alternative parsing paths - regex fallback
+            import re
+            text_for_regex = text_bulk
+            # Try multiple regex patterns
+            patterns_media = [
+                r'"media_id"\s*:\s*"?(\d+)"?',
+                r'"media_id"\s*:\s*(\d+)',
+                r'media_id["\']?\s*[:=]\s*["\']?(\d+)',
+                r'(\d{15,})',  # media_ids are typically long numbers
+            ]
+            patterns_owner = [
+                r'"owner_id"\s*:\s*"?(\d+)"?',
+                r'"owner_id"\s*:\s*(\d+)',
+                r'owner_id["\']?\s*[:=]\s*["\']?(\d+)',
+            ]
+            
+            for pattern in patterns_media:
+                m_media = re.search(pattern, text_for_regex)
+                if m_media:
+                    candidate = m_media.group(1)
+                    # Validate it's a reasonable length (media_ids are usually 10-20 digits)
+                    if len(candidate) >= 10 and len(candidate) <= 20:
+                        media_id = candidate
+                        debug_log(f"Found media_id via regex pattern '{pattern}': {media_id}")
+                        break
+            
+            for pattern in patterns_owner:
+                m_owner = re.search(pattern, text_for_regex)
+                if m_owner:
+                    candidate = m_owner.group(1)
+                    if len(candidate) >= 8 and len(candidate) <= 15:
+                        owner_id = candidate
+                        debug_log(f"Found owner_id via regex pattern '{pattern}': {owner_id}")
+                        break
+            
+            debug_log(f"After regex fallback - media_id: {media_id}, owner_id: {owner_id}")
+            
+            if not media_id or not owner_id:
+                error_msg = f"Failed to extract media_id or owner_id from bulk route response. Route key found: {found_route_key}, Route obj empty: {not route_obj}"
+                debug_log(error_msg)
+                # Still return media_id if we found it, even without owner_id (though GraphQL won't work)
+                result = {}
+                if media_id:
+                    result["media_id"] = str(media_id)
+                if debug:
+                    result["_debug"] = debug_info
+                    result["_error"] = error_msg
+                return result
+        
+        media_id_str = str(media_id)
+        owner_id = str(owner_id)
+        
+        debug_log(f"Extracted - media_id: {media_id_str}, owner_id: {owner_id}")
+        
+        # Step 2: Call GraphQL endpoint to get user's reels
+        # Fetch CSRF token if needed
+        csrf_token = None
+        if cookie_header:
+            def _extract_cookie_value(cookie_str: str, key: str) -> Optional[str]:
+                try:
+                    parts = [p.strip() for p in cookie_str.split(';')]
+                    for p in parts:
+                        if p.startswith(key + "="):
+                            return p.split('=', 1)[1]
+                except Exception:
+                    return None
+                return None
+            csrf_token = _extract_cookie_value(cookie_header, "csrftoken")
+        
+        if not csrf_token:
+            csrf_token = fetch_csrf_token_from_homepage()
+        
+        headers_graphql = {
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "priority": "u=1, i",
+            "referer": f"https://www.instagram.com/reel/{shortcode}/",
+            "sec-ch-prefers-color-scheme": "dark",
+            "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+            "x-asbd-id": "359341",
+            "x-ig-app-id": "936619743392459",
+            "x-ig-www-claim": "0",
+            "x-requested-with": "XMLHttpRequest",
+        }
+        
+        if cookie_header:
+            headers_graphql["cookie"] = cookie_header
+        
+        if csrf_token:
+            headers_graphql["x-csrftoken"] = csrf_token
+        
+        # GraphQL query - doc_id 7950326061742207 for user timeline media
+        graphql_vars = {
+            "id": owner_id,
+            "include_clips_attribution_info": False,
+            "first": 50,  # Fetch first 50 reels to increase chances of finding the target
+        }
+        
+        debug_log(f"GraphQL query vars: {graphql_vars}")
+        
+        graphql_url = f"https://www.instagram.com/graphql/query/?doc_id=7950326061742207&variables={urllib.parse.quote(json.dumps(graphql_vars))}"
+        
+        resp_graphql = get_shared_session().get(
+            graphql_url,
+            headers=headers_graphql,
+            timeout=20,
+        )
+        
+        if not resp_graphql.ok:
+            error_msg = f"GraphQL request failed: {resp_graphql.status_code} - {resp_graphql.text[:200]}"
+            debug_log(error_msg)
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
+        try:
+            j_graphql = resp_graphql.json()
+        except json.JSONDecodeError as e:
+            error_msg = f"GraphQL JSON decode error: {e}, text: {resp_graphql.text[:500]}"
+            debug_log(error_msg)
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
+        # Check for GraphQL errors
+        if j_graphql.get("errors"):
+            error_msg = f"GraphQL errors: {j_graphql.get('errors')}"
+            debug_log(error_msg)
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
+        # Step 3: Match media_id in GraphQL response
+        user_data = (j_graphql.get("data") or {}).get("user") or {}
+        
+        if not user_data:
+            error_msg = "GraphQL response missing user data"
+            debug_log(error_msg)
+            debug_log(f"GraphQL response keys: {list(j_graphql.keys())}")
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        edges = (((user_data.get("edge_owner_to_timeline_media") or {}).get("edges") or []))
+        
+        debug_log(f"GraphQL response - found {len(edges)} edges")
+        if edges:
+            debug_log(f"First edge node id: {edges[0].get('node', {}).get('id')}")
+        debug_log(f"Looking for media_id: {media_id_str}")
+        
+        for edge in edges:
+            node = edge.get("node") or {}
+            node_id = str(node.get("id") or "")
+            # Match by media_id (exact match)
+            if node_id == media_id_str:
+                debug_log(f"Matched node! video_view_count: {node.get('video_view_count')}")
+                # Extract stats
+                video_view_count = node.get("video_view_count")
+                like_count = ((node.get("edge_media_preview_like") or {}).get("count") or 0)
+                comment_count = ((node.get("edge_media_to_comment") or {}).get("count") or 0)
+                taken_at = node.get("taken_at_timestamp")
+                shortcode_found = node.get("shortcode")
+                caption_edge = (node.get("edge_media_to_caption") or {}).get("edges") or []
+                caption_text = ""
+                if caption_edge:
+                    caption_text = (caption_edge[0].get("node") or {}).get("text") or ""
+                
+                posted_on = None
+                try:
+                    if taken_at:
+                        posted_on = datetime.fromtimestamp(int(taken_at), timezone.utc).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+                
+                result = {
+                    "play_count": video_view_count,
+                    "video_view_count": video_view_count,
+                    "like_count": like_count,
+                    "comment_count": comment_count,
+                    "shortcode": shortcode_found or shortcode,
+                    "posted_on": posted_on,
+                    "caption": caption_text,
+                    "product_type": node.get("product_type"),
+                    "media_type": "GraphVideo" if node.get("__typename") == "GraphVideo" else "unknown",
+                    "media_id": media_id_str,  # Include media_id in result
+                }
+                if debug:
+                    result["_debug"] = debug_info
+                return result
+        
+        # Not found in first page - media_id exists but not in first 50 results
+        # Could implement pagination here if needed
+        error_msg = f"Media ID {media_id_str} not found in GraphQL response (checked {len(edges)} edges)"
+        debug_log(error_msg)
+        # Show first few node IDs for debugging
+        for i, edge in enumerate(edges[:5]):
+            debug_log(f"  Edge {i}: node id = {edge.get('node', {}).get('id')}")
+        
+        result = {"media_id": media_id_str}  # Still return media_id even if not found in GraphQL
+        if debug:
+            result["_debug"] = debug_info
+            result["_error"] = error_msg
+        return result
+        
+    except Exception as e:
+        # Log error if debug is enabled
+        import traceback
+        error_msg = f"Exception in fetch_reel_stats_via_graphql: {type(e).__name__}: {e}"
+        debug_log(error_msg)
+        if debug:
+            debug_log(traceback.format_exc())
+        result = {}
+        if debug:
+            result["_debug"] = debug_info
+            result["_error"] = error_msg
+        return result
+
+# ----------------------------
 # Bulk-route: get media_id for a shortcode only
 # ----------------------------
 def fetch_media_id_via_bulk_route(
@@ -584,36 +1151,45 @@ def fetch_media_id_via_bulk_route(
 # Data Fetching (cached) via Instagram Web API
 # ----------------------------
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_user_id_with_cookies(username: str, cookie_header: str) -> Optional[str]:
+def fetch_user_id_public(username: str) -> Optional[str]:
     url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     headers = {
-        "x-ig-app-id": "936619743392459",
-        "x-requested-with": "XMLHttpRequest",
-        "user-agent": "Mozilla/5.0",
-        "cookie": cookie_header,
         "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "x-ig-app-id": "936619743392459",
+        "x-ig-www-claim": "0",
+        "x-requested-with": "XMLHttpRequest",
+        "referer": f"https://www.instagram.com/{username}/",
+        "origin": "https://www.instagram.com",
     }
     resp = get_shared_session().get(url, headers=headers, timeout=20)
-    if resp.status_code in (401, 403):
-        raise PermissionError("Unauthorized or cookies expired")
-    if resp.status_code == 429:
-        raise ConnectionError("Rate limited (429)")
-    resp.raise_for_status()
-    data = resp.json()
-    return (((data or {}).get("data") or {}).get("user") or {}).get("id")
+    if not resp.ok:
+        return None
+    try:
+        data = resp.json()
+        user_id = (((data or {}).get("data") or {}).get("user") or {}).get("id")
+        return user_id
+    except Exception:
+        return None
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_profile_media_count(username: str, cookie_header: str) -> Optional[int]:
+def fetch_profile_media_count(username: str) -> Optional[int]:
     """Get total media count from web_profile_info (overall posts)."""
     url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     headers = {
-        "x-ig-app-id": "936619743392459",
-        "x-requested-with": "XMLHttpRequest",
-        "user-agent": "Mozilla/5.0",
-        "cookie": cookie_header,
         "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "x-ig-app-id": "936619743392459",
+        "x-ig-www-claim": "0",
+        "x-requested-with": "XMLHttpRequest",
+        "referer": f"https://www.instagram.com/{username}/",
+        "origin": "https://www.instagram.com",
     }
-    resp = get_shared_session().get(url, headers=headers, timeout=20)
+    # Use a fresh session to avoid stale state
+    fresh_session = requests.Session()
+    resp = fresh_session.get(url, headers=headers, timeout=20)
     if not resp.ok:
         return None
     try:
@@ -754,10 +1330,20 @@ def parse_stats_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
         posted_on = datetime.fromtimestamp(int(ts), timezone.utc).strftime("%Y-%m-%d") if ts else None
     except Exception:
         posted_on = None
+    
+    # Try all possible field names for play_count
+    play_count = (
+        item.get("play_count")
+        or item.get("video_play_count")
+        or item.get("view_count")
+        or item.get("video_view_count")
+        or item.get("views")
+    )
+    
     return {
-        "play_count": item.get("play_count") or item.get("video_play_count") or item.get("view_count"),
-        "like_count": item.get("like_count") or (item.get("edge_liked_by") or {}).get("count"),
-        "comment_count": item.get("comment_count") or (item.get("edge_media_to_comment") or {}).get("count"),
+        "play_count": play_count,
+        "like_count": item.get("like_count") or (item.get("edge_liked_by") or {}).get("count") or item.get("likes"),
+        "comment_count": item.get("comment_count") or (item.get("edge_media_to_comment") or {}).get("count") or item.get("comments"),
         "shortcode": item.get("code") or item.get("shortcode"),
         "posted_on": posted_on,
         "product_type": item.get("product_type"),
@@ -823,12 +1409,13 @@ def fetch_media_id_from_html(shortcode: str, cookie_header: str) -> Optional[str
 # ----------------------------
 # Shared Inputs (global across tabs)
 # ----------------------------
-cookie_header_global = st.text_area(
-    "Cookie header for Instagram web API",
+cookie_header_global_raw = st.text_area(
+    "Cookie header for Instagram web API (optional for profile; recommended for real-time data)",
     value="",
     placeholder="sessionid=...; csrftoken=...; ds_user_id=...; ...",
-    help="Open DevTools → Network on instagram.com, select any XHR, and copy the full Cookie header.",
+    help="Open DevTools → Network on instagram.com, select any XHR, and copy the full Cookie header. Note: Without cookies, Instagram returns cached data (may be hours old). With cookies, you get real-time data.",
 )
+cookie_header_global = cookie_header_global_raw.strip() if cookie_header_global_raw else ""
 
 
 # Keep session state
@@ -846,7 +1433,7 @@ if "profile_media_count" not in st.session_state:
     st.session_state["profile_media_count"] = None
 
 def clear_cache_for_username(u: str):
-    fetch_user_id_with_cookies.clear()
+    fetch_user_id_public.clear()
 
 def validate_username(u: str) -> Optional[str]:
     if not u:
@@ -940,6 +1527,14 @@ with tab_profile:
     username_to_use = None
     if fetch_clicked:
         username_to_use = extract_username_from_input(username_input)
+        # Fetch and display IP address
+        try:
+            ip_info_resp = requests.get("https://api.ipify.org?format=json", timeout=5)
+            if ip_info_resp.ok:
+                ip_data = ip_info_resp.json()
+                st.info(f"🌐 Your IP: {ip_data.get('ip', 'Unknown')}")
+        except:
+            pass
     # no refresh button; cache clears automatically on Clear
 
     if username_to_use and fetch_clicked:
@@ -949,24 +1544,24 @@ with tab_profile:
         else:
             with st.spinner("Fetching profile info..."):
                 try:
-                    if not cookie_header_global:
-                        st.error("Cookie header is required. Paste your Instagram Cookie header above.")
+                    # If same username is already loaded, reuse user_id; else fetch (no cookies required)
+                    if st.session_state.get("profile_username_current") == username_to_use and st.session_state.get("profile_user_id"):
+                        user_id = st.session_state["profile_user_id"]
                     else:
-                        # If same username is already loaded, reuse user_id; else fetch
-                        if st.session_state.get("profile_username_current") == username_to_use and st.session_state.get("profile_user_id"):
-                            user_id = st.session_state["profile_user_id"]
-                        else:
-                            user_id = fetch_user_id_with_cookies(username_to_use, cookie_header_global)
+                        user_id = fetch_user_id_public(username_to_use)
                         if not user_id:
-                            st.error("Profile not found or private.")
+                            # Check response details if available for better error messages
+                            st.error(f"Profile @{username_to_use} not found, may be private, or Instagram blocked the request. Some profiles may require authentication even if they appear public.")
+                            if show_diag_profile:
+                                st.warning(f"Debug: user_id fetch returned None. Try checking the username or network tab.")
                         else:
                             st.session_state["profile_user_id"] = user_id
                             st.session_state["profile_username_current"] = username_to_use
-                            st.session_state["profile_media_count"] = fetch_profile_media_count(username_to_use, cookie_header_global)
+                            st.session_state["profile_media_count"] = fetch_profile_media_count(username_to_use)
                             st.success(f"Loaded profile @{username_to_use}")
 
-                except PermissionError:
-                    st.error("Profile not found or private, or cookies expired.")
+                except PermissionError as pe:
+                    st.error(str(pe))
                 except ConnectionError:
                     st.error("Too many requests. Try again later.")
                 except requests.HTTPError as e:
@@ -995,64 +1590,70 @@ with tab_profile:
             try:
                 username_proc = st.session_state["profile_username_current"]
                 user_id_proc = st.session_state["profile_user_id"]
-                gql = fetch_profile_reels_graphql(
-                    cookie_header=cookie_header_global,
+                
+                # Note about data freshness
+                if not cookie_header_global:
+                    st.info("ℹ️ **Note:** Without cookies, Instagram returns cached data (may be up to a few hours old). For real-time data, provide your Instagram session cookie above.")
+                
+                # Add timestamp to prevent any caching
+                import time as time_module
+                cache_buster = str(time_module.time())
+                
+                resp = fetch_profile_reels_public(
                     target_user_id=user_id_proc,
                     page_size=int(max_fetch),
                     referer=f"https://www.instagram.com/{username_proc}/",
+                    cookie_header=cookie_header_global if cookie_header_global else None,
+                    _cache_buster=cache_buster,
                 )
 
-                edges = None
-                for path in [
-                    ("data", "xdt_api__v1__clips__user__connection_v2", "edges"),
-                    ("data", "user", "edge_clips_tab", "edges"),
-                    ("data", "user", "edge_owner_to_timeline_media", "edges"),
-                ]:
-                    cur = gql
-                    ok = True
-                    for p in path:
-                        cur = cur.get(p)
-                        if cur is None:
-                            ok = False
-                            break
-                    if ok:
-                        edges = cur
-                        break
-
                 items: List[Dict[str, Any]] = []
-                if isinstance(edges, list):
-                    for e in edges[: int(max_fetch)]:
-                        node = (e or {}).get("node") or {}
-                        media = node.get("media") or node
-                        shortcode = media.get("code") or media.get("shortcode") or ""
-                        media_pk = media.get("pk") or ""
-                        like_count = (
-                            (media.get("edge_liked_by") or {}).get("count")
-                            or media.get("like_count")
-                            or 0
-                        )
-                        comment_count = (
-                            (media.get("edge_media_to_comment") or {}).get("count")
-                            or media.get("comment_count")
-                            or 0
-                        )
-                        play_count = (
-                            media.get("play_count")
-                            or media.get("video_play_count")
-                            or media.get("view_count")
-                        )
-                        ts = media.get("taken_at_timestamp") or media.get("taken_at")
-                        taken_at = (
-                            datetime.fromtimestamp(int(ts), timezone.utc) if ts else datetime.now(timezone.utc)
-                        )
-                        items.append(
+                # Handle response structure - could be direct items array or nested
+                resp_items = resp.get("items") or []
+                if not resp_items and isinstance(resp, dict):
+                    # Sometimes the response structure is different
+                    resp_items = resp.get("data", {}).get("items") or []
+                
+                # Debug: Show what we got (always show first item structure for debugging)
+                if resp_items and not IS_PROD:
+                    with st.expander("🔍 Debug: Response Structure (click to view)", expanded=False):
+                        st.json({"sample_item": resp_items[0], "total_items": len(resp_items)})
+                
+                for it in resp_items[: int(max_fetch)]:
+                    media = (it or {}).get("media") or it or {}
+                    shortcode = media.get("code") or media.get("shortcode") or ""
+                    media_pk = media.get("pk") or media.get("id") or ""
+                    # Try multiple possible field names for counts
+                    like_count = (
+                        media.get("like_count") 
+                        or media.get("likes")
+                        or ((media.get("edge_liked_by") or {}).get("count") or 0)
+                    )
+                    comment_count = (
+                        media.get("comment_count")
+                        or media.get("comments")
+                        or ((media.get("edge_media_to_comment") or {}).get("count") or 0)
+                    )
+                    # Play count is the most important - check all possible fields
+                    play_count = (
+                        media.get("play_count")
+                        or media.get("video_play_count")
+                        or media.get("view_count")
+                        or media.get("video_view_count")
+                        or media.get("views")
+                    )
+                    ts = media.get("taken_at_timestamp") or media.get("taken_at")
+                    taken_at = (
+                        datetime.fromtimestamp(int(ts), timezone.utc) if ts else datetime.now(timezone.utc)
+                    )
+                    items.append(
                             {
                                 "shortcode": shortcode,
                                 "media_pk": media_pk,
                                 "owner_username": username_proc,
-                                "likes": like_count,
-                                "comments": comment_count,
-                                "video_view_count": play_count,
+                            "likes": like_count or 0,
+                            "comments": comment_count or 0,
+                            "video_view_count": play_count or 0,
                                 "taken_at_timestamp": taken_at,
                             }
                         )
@@ -1062,7 +1663,7 @@ with tab_profile:
                 else:
                     st.success(f"Found {len(items)} Reels from @{username_proc}")
 
-                    # Optimized process: batch resolve IDs, parallel stats, optional captions
+                    # Build table directly from public response (no cookies required)
                     rows: List[Dict[str, Any]] = []
                     table_ph = st.empty()
                     prog = st.progress(0)
@@ -1073,59 +1674,25 @@ with tab_profile:
                                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
                         return df
 
-                    shortcodes = [it.get("shortcode") or "" for it in items]
-                    id_map = bulk_fetch_media_ids(shortcodes, cookie_header_global)
+                    # Render incrementally
 
                     from concurrent.futures import ThreadPoolExecutor, as_completed
                     max_workers = min(8, max(2, len(items)))
 
                     def process_one(i: int) -> Dict[str, Any]:
-                        sc = shortcodes[i]
-                        media_id = id_map.get(sc)
-                        resolver_used = "bulk"
-                        if not media_id:
-                            media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
-                            if not media_id:
-                                return {
-                                    "Reel Link": f"https://www.instagram.com/reel/{sc}/" if sc else "",
-                                    "posted_on": "",
-                                    "caption": "",
-                                    "media_type": "",
-                                    "Total Views": 0,
-                                    "Total Likes": 0,
-                                    "Total Comments": 0,
-                                                "status": "not found",
-                                                "diag": "resolver=none",
-                                }
-                        ref = f"https://www.instagram.com/p/{sc}/"
-                        try:
-                            stats = fetch_media_stats_by_pk(media_id, cookie_header_global, referer_url=ref)
-                        except Exception:
-                            stats = {}
-                        if not stats:
-                            try:
-                                item = resolve_media_by_shortcode(sc, cookie_header_global)
-                                stats = parse_stats_from_item(item)
-                                resolver_used = resolver_used + "+shortcode"
-                            except Exception:
-                                stats = {}
+                        it = items[i]
+                        sc = it.get("shortcode") or ""
                         cap = ""
-                        if fetch_captions_profile:
-                            try:
-                                cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
-                            except Exception:
-                                cap = ""
-                        shortcode_out = (stats.get("shortcode") if stats else None) or sc
                         return {
-                            "Reel Link": f"https://www.instagram.com/reel/{shortcode_out}/" if shortcode_out else "",
-                            "posted_on": stats.get("posted_on") if stats else "",
+                            "Reel Link": f"https://www.instagram.com/reel/{sc}/" if sc else "",
+                            "posted_on": it.get("taken_at_timestamp").strftime("%Y-%m-%d") if it.get("taken_at_timestamp") else "",
                             "caption": cap,
-                            "media_type": (stats.get("product_type") or stats.get("media_type")) if stats else "",
-                            "Total Views": stats.get("play_count") if stats else 0,
-                            "Total Likes": stats.get("like_count") if stats else 0,
-                            "Total Comments": stats.get("comment_count") if stats else 0,
-                            "status": "ok" if stats else "partial",
-                            "diag": f"resolver={resolver_used}; stats={'ok' if stats else 'empty'}; captions={'on' if fetch_captions_profile and cap else 'off'}" if show_diag_profile else "",
+                            "media_type": "reel",
+                            "Total Views": int(it.get("video_view_count") or 0),
+                            "Total Likes": int(it.get("likes") or 0),
+                            "Total Comments": int(it.get("comments") or 0),
+                            "status": "ok",
+                            "diag": "source=clips/user" if show_diag_profile else "",
                         }
 
                     completed = 0
@@ -1163,8 +1730,8 @@ with tab_profile:
                         df_final = _ensure_arrow_safe(pd.DataFrame(ordered))
                         table_ph.dataframe(df_final, width="stretch", hide_index=True)
                 st.session_state["last_username"] = username_proc
-            except PermissionError:
-                st.error("Profile not found or private, or cookies expired.")
+            except PermissionError as pe:
+                st.error(str(pe))
             except ConnectionError:
                 st.error("Too many requests. Try again later.")
             except requests.HTTPError as e:
@@ -1260,6 +1827,7 @@ with tab_reels:
                                     if not media_id:
                                         return {
                                             "Reel Link": link,
+                                            "Media ID": "",
                                             "posted_on": "",
                                             "caption": "",
                                             "media_type": "",
@@ -1288,8 +1856,10 @@ with tab_reels:
                                         cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
                                     except Exception:
                                         cap = ""
+                                media_id_final_csv = stats.get("media_id") if stats else media_id
                                 return {
                                     "Reel Link": link,
+                                    "Media ID": media_id_final_csv if media_id_final_csv else "",
                                     "posted_on": stats.get("posted_on") if stats else "",
                                     "caption": cap,
                                     "media_type": (stats.get("product_type") or stats.get("media_type")) if stats else "",
@@ -1317,6 +1887,7 @@ with tab_reels:
                                         except Exception as e:
                                             res = {
                                                 "Reel Link": "",
+                                                "Media ID": "",
                                                 "posted_on": "",
                                                 "caption": "",
                                                 "media_type": "",
@@ -1401,9 +1972,13 @@ with tab_reels:
     if start_batch:
         if not batch_input:
             st.error("Please enter at least one shortcode or Reel URL.")
-        elif not cookie_header_global:
-            st.error("Please paste your Cookie header above.")
         else:
+            # Note about cookies for real-time data
+            if not cookie_header_global:
+                st.warning("⚠️ **Note:** Cookie header is empty. Without cookies, Instagram returns cached data (may be hours old). For real-time data, provide your Instagram session cookie above.")
+            else:
+                st.info("✅ Using cookies - fetching real-time data.")
+            
             import re as _re
             tokens = [t for t in _re.split(r"[\s,]+", batch_input) if t]
             rows: List[Dict[str, Any]] = []
@@ -1418,9 +1993,21 @@ with tab_reels:
                         if col in df.columns:
                             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
                     return df
-                # Resolve IDs first
+                # Resolve IDs - try with cookies if available
                 shortcodes = [extract_shortcode(token) or token for token in tokens]
-                id_map = bulk_fetch_media_ids(shortcodes, cookie_header_global)
+                id_map = {}
+                if cookie_header_global:
+                    try:
+                        id_map = bulk_fetch_media_ids(shortcodes, cookie_header_global)
+                        if show_diag_manual_opt:
+                            st.write(f"🔍 Bulk resolver found {len([k for k, v in id_map.items() if v])} media_ids out of {len(shortcodes)} shortcodes")
+                    except Exception as e:
+                        if show_diag_manual_opt:
+                            st.warning(f"⚠️ Bulk resolver failed: {e}")
+                        id_map = {}
+                else:
+                    if show_diag_manual_opt:
+                        st.info("ℹ️ No cookies - will try shortcode endpoint directly (may work for public content)")
 
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 max_workers = 8
@@ -1429,38 +2016,207 @@ with tab_reels:
                     sc = shortcodes[i]
                     media_id = id_map.get(sc)
                     resolver_used = "bulk"
+                    
+                    # Debug output for first item
+                    if i == 0 and show_diag_manual_opt:
+                        st.write(f"🔍 Debug: Processing first reel - shortcode: {sc}, media_id from bulk: {media_id}")
+                    
+                    # Try to get media_id even without cookies (for public content)
                     if not media_id:
-                        media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
+                        # Try with cookies if available
+                        if cookie_header_global:
+                            if i == 0 and show_diag_manual_opt:
+                                st.write(f"🔄 Trying fallback resolver for shortcode: {sc}")
+                            try:
+                                media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
+                                if i == 0 and show_diag_manual_opt:
+                                    st.write(f"🔍 After fallback resolver, media_id: {media_id}")
+                            except Exception as e:
+                                if i == 0 and show_diag_manual_opt:
+                                    st.error(f"❌ Fallback resolver error: {type(e).__name__}: {e}")
+                                media_id = None
+                            
+                            # If still no media_id, try direct shortcode endpoint as last resort
                         if not media_id:
-                            return {
-                                "Reel Link": f"https://www.instagram.com/reel/{sc}/" if sc else "",
-                                "posted_on": "",
-                                "caption": "",
-                                "media_type": "",
-                                "Total Views": 0,
-                                "Total Likes": 0,
-                                "Total Comments": 0,
-                                "status": "not found",
-                                "diag": "resolver=none" if show_diag_manual_opt else "",
-                            }
+                                if i == 0 and show_diag_manual_opt:
+                                    st.write(f"🔄 Last resort: trying direct shortcode endpoint")
+                                try:
+                                    item = resolve_media_by_shortcode(sc, cookie_header_global)
+                                    if item:
+                                        media_id = item.get("id") or item.get("pk")
+                                        if media_id:
+                                            # Handle format like "123456_789012"
+                                            if isinstance(media_id, str) and "_" in media_id:
+                                                media_id = media_id.split("_")[0]
+                                        if i == 0 and show_diag_manual_opt:
+                                            st.write(f"🔍 Direct shortcode endpoint returned media_id: {media_id}")
+                                except Exception as e:
+                                    if i == 0 and show_diag_manual_opt:
+                                        st.error(f"❌ Direct shortcode endpoint error: {type(e).__name__}: {e}")
+                        
+                        # Also try without cookies (for public content)
+                        if not media_id:
+                            if i == 0 and show_diag_manual_opt:
+                                st.write(f"🔄 Trying shortcode endpoint without cookies (public content)")
+                            try:
+                                # Try shortcode endpoint without cookies
+                                item = resolve_media_by_shortcode(sc, "")  # Empty cookie string
+                                if item:
+                                    media_id = item.get("id") or item.get("pk")
+                                    if media_id and isinstance(media_id, str) and "_" in media_id:
+                                        media_id = media_id.split("_")[0]
+                                    if i == 0 and show_diag_manual_opt:
+                                        st.write(f"🔍 Shortcode endpoint (no cookies) returned media_id: {media_id}")
+                            except Exception as e:
+                                if i == 0 and show_diag_manual_opt:
+                                    st.warning(f"⚠️ Shortcode endpoint without cookies failed: {type(e).__name__}: {e}")
+                        
+                        if not media_id:
+                            if i == 0 and show_diag_manual_opt:
+                                st.warning(f"⚠️ Could not resolve media_id for shortcode: {sc}, but will try to get stats directly")
+                    
+                    # Even if media_id is missing, we can still try to get stats from shortcode endpoint
                     ref = f"https://www.instagram.com/p/{sc}/"
+                    stats = {}
+                    
+                    # Debug: Check cookie header
+                    if i == 0 and show_diag_manual_opt:
+                        st.write(f"🔍 Debug: cookie_header_global = '{cookie_header_global[:50] if cookie_header_global else '(empty)'}...'")
+                        st.write(f"🔍 Debug: len(cookie_header_global) = {len(cookie_header_global) if cookie_header_global else 0}")
+                        st.write(f"🔍 Debug: bool(cookie_header_global) = {bool(cookie_header_global)}")
+                    
+                    # Strategy 0: For unauthenticated requests, use GraphQL method (bulk-route + graphql)
+                    # This is the method that works when user is not logged in
+                    stats_graphql_result = None  # Store for debug display
+                    if not cookie_header_global:
+                        if i == 0 and show_diag_manual_opt:
+                            st.write(f"🔄 Strategy 0: Trying GraphQL method (bulk-route + graphql) for unauthenticated request")
+                        try:
+                            stats_graphql_result = fetch_reel_stats_via_graphql(sc, cookie_header="", debug=show_diag_manual_opt)
+                            
+                            # Extract media_id from GraphQL result if available, and use stats if any
+                            media_id_from_graphql = stats_graphql_result.get("media_id") if stats_graphql_result else None
+                            if media_id_from_graphql:
+                                media_id = media_id_from_graphql  # Use media_id from GraphQL if available
+                            
+                            if stats_graphql_result and stats_graphql_result.get("play_count"):
+                                # Remove debug info before using stats
+                                stats = {k: v for k, v in stats_graphql_result.items() if not k.startswith("_")}
+                                resolver_used = "graphql"  # Replace bulk with graphql since this is the primary method for unauthenticated
+                            elif stats_graphql_result:
+                                # Even if no play_count, use whatever stats we got (including media_id)
+                                stats = {k: v for k, v in stats_graphql_result.items() if not k.startswith("_")}
+                                resolver_used = resolver_used + "+graphql_partial"
+                        except Exception as e:
+                            if i == 0 and show_diag_manual_opt:
+                                st.error(f"❌ Strategy 0 (GraphQL) exception: {type(e).__name__}: {e}")
+                                import traceback
+                                st.code(traceback.format_exc(), language="python")
+                    
+                    # Strategy 1: If we have media_id, try fetching stats by pk
+                    if media_id and cookie_header_global:
+                        if i == 0 and show_diag_manual_opt:
+                            st.write(f"🔍 Strategy 1: Fetching stats for media_id: {media_id} via GET /api/v1/media/{media_id}/info/")
                     try:
                         stats = fetch_media_stats_by_pk(
                             media_id,
                             cookie_header_global,
                             referer_url=ref,
                         )
-                    except Exception:
+                        # Debug: show what we got (first item only)
+                        if i == 0 and show_diag_manual_opt:
+                            st.json({"fetch_media_stats_by_pk_response": stats})
+                            if stats and stats.get("play_count"):
+                                st.success(f"✅ Strategy 1 worked! play_count: {stats.get('play_count')}")
+                            elif stats:
+                                st.warning(f"⚠️ Strategy 1 returned stats but no play_count. Keys: {list(stats.keys())}")
+                            else:
+                                st.warning("⚠️ Strategy 1 returned empty stats")
+                    except Exception as e:
+                        if i == 0 and show_diag_manual_opt:
+                            st.error(f"❌ Strategy 1 failed: {type(e).__name__}: {e}")
                         stats = {}
-                    if not stats:
+                    
+                    # Strategy 2: Try fetching directly from shortcode endpoint (PRIMARY METHOD)
+                    # API: GET https://www.instagram.com/api/v1/media/shortcode/{shortcode}/info/
+                    # This can work with or without cookies (for public content)
+                    if not stats or not stats.get("play_count"):
+                        cookie_to_use = cookie_header_global if cookie_header_global else ""
+                        if i == 0 and show_diag_manual_opt:
+                            st.write(f"🔄 Strategy 2: Trying shortcode endpoint {'with' if cookie_to_use else 'without'} cookies")
+                            st.write(f"🔄 Strategy 2: API endpoint: GET /api/v1/media/shortcode/{sc}/info/")
                         try:
-                            item = resolve_media_by_shortcode(sc, cookie_header_global)
-                            stats = parse_stats_from_item(item)
-                            resolver_used = resolver_used + "+shortcode"
-                        except Exception:
-                            stats = {}
+                            if i == 0 and show_diag_manual_opt:
+                                st.write(f"🔍 Calling resolve_media_by_shortcode with cookie: {'yes' if cookie_to_use else 'no'}")
+                            item = resolve_media_by_shortcode(sc, cookie_to_use)
+                            if item:
+                                if i == 0 and show_diag_manual_opt:
+                                    st.write(f"✅ Shortcode endpoint returned data with keys: {list(item.keys())[:10]}")
+                                stats_from_shortcode = parse_stats_from_item(item)
+                                # Only use if it has play_count
+                                if stats_from_shortcode.get("play_count"):
+                                    stats = stats_from_shortcode
+                                    resolver_used = resolver_used + "+shortcode_api"
+                                    if i == 0 and show_diag_manual_opt:
+                                        st.success(f"✅ Got stats from shortcode API! play_count: {stats.get('play_count')}")
+                                        st.json({"resolve_media_by_shortcode_response": stats})
+                                elif i == 0 and show_diag_manual_opt:
+                                    st.warning(f"⚠️ Shortcode API returned item but no play_count. Available keys: {list(item.keys())[:10]}")
+                                    # Show what fields ARE available - especially look for any count fields
+                                    preview_dict = {}
+                                    for key in list(item.keys())[:15]:
+                                        val = item.get(key)
+                                        if isinstance(val, (int, str)) or val is None:
+                                            preview_dict[key] = val
+                                    st.json({"sample_item_preview": preview_dict})
+                                    # Also check nested structures
+                                    if item.get("video_view_count"):
+                                        st.info(f"Found video_view_count: {item.get('video_view_count')}")
+                                    if item.get("view_count"):
+                                        st.info(f"Found view_count: {item.get('view_count')}")
+                        except Exception as e:
+                            if i == 0 and show_diag_manual_opt:
+                                st.error(f"❌ Strategy 2 failed: {type(e).__name__}: {e}")
+                                import traceback
+                                st.code(traceback.format_exc(), language="python")
+                    
+                    # Strategy 3: Try using fetch_play_count_with_cookies directly
+                    if (not stats or not stats.get("play_count")) and cookie_header_global:
+                        if i == 0 and show_diag_manual_opt:
+                            st.write("🔄 Trying direct play_count endpoint")
+                        try:
+                            play_count = fetch_play_count_with_cookies(f"https://www.instagram.com/reel/{sc}/", cookie_header_global)
+                            if play_count:
+                                stats = {"play_count": play_count, "shortcode": sc}
+                                resolver_used = resolver_used + "+play_count_direct"
+                                if i == 0 and show_diag_manual_opt:
+                                    st.write(f"✅ Got play_count directly: {play_count}")
+                        except Exception as e:
+                            if i == 0 and show_diag_manual_opt:
+                                st.error(f"❌ Error fetching play_count directly: {type(e).__name__}: {e}")
+                    
+                    # Strategy 4: Also try GraphQL method even with cookies (as fallback)
+                    if (not stats or not stats.get("play_count")):
+                        if i == 0 and show_diag_manual_opt:
+                            st.write(f"🔄 Strategy 4: Trying GraphQL method as fallback")
+                        try:
+                            stats_graphql = fetch_reel_stats_via_graphql(sc, cookie_header=cookie_header_global or "", debug=show_diag_manual_opt)
+                            if stats_graphql and stats_graphql.get("play_count"):
+                                stats = stats_graphql
+                                resolver_used = resolver_used + "+graphql_fallback"
+                                if i == 0 and show_diag_manual_opt:
+                                    st.success(f"✅ Strategy 4 (GraphQL fallback) worked! play_count: {stats.get('play_count')}")
+                        except Exception as e:
+                            if i == 0 and show_diag_manual_opt:
+                                st.warning(f"⚠️ Strategy 4 (GraphQL fallback) failed: {type(e).__name__}: {e}")
+                    
+                    # Final check: if we still have no stats and no media_id, mark as failed
+                    if not stats and not media_id:
+                        if i == 0 and show_diag_manual_opt:
+                            st.error(f"❌ All methods failed - no stats and no media_id for shortcode: {sc}")
+                    
                     cap = ""
-                    if fetch_captions_manual_opt:
+                    if fetch_captions_manual_opt and media_id and cookie_header_global:
                         try:
                             cap = fetch_caption_by_media_pk(
                                 media_id,
@@ -1470,29 +2226,75 @@ with tab_reels:
                         except Exception:
                             cap = ""
                     shortcode = (stats.get("shortcode") if stats else None) or sc
-                    return {
+                    # Get media_id from stats or from earlier resolution
+                    media_id_final = stats.get("media_id") if stats else media_id
+                    
+                    # Get play_count from stats, checking multiple possible field names
+                    play_count = None
+                    if stats:
+                        play_count = (
+                            stats.get("play_count")
+                            or stats.get("video_play_count")
+                            or stats.get("view_count")
+                            or stats.get("video_view_count")
+                        )
+                    play_count = play_count if play_count is not None else 0
+                    like_count = stats.get("like_count") if stats else 0
+                    comment_count = stats.get("comment_count") if stats else 0
+                    
+                    # Status: "ok" if we have play_count, "partial" if we have stats but no play_count, "failed" if no stats
+                    if stats and play_count:
+                        status = "ok"
+                    elif stats:
+                        status = "partial (no play_count)"
+                    else:
+                        status = "failed"
+                    
+                    result_dict = {
                         "Reel Link": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else "",
+                        "Media ID": media_id_final if media_id_final else "",
                         "posted_on": stats.get("posted_on") if stats else "",
                         "caption": cap,
                         "media_type": (stats.get("product_type") or stats.get("media_type")) if stats else "",
-                        "Total Views": stats.get("play_count") if stats else 0,
-                        "Total Likes": stats.get("like_count") if stats else 0,
-                        "Total Comments": stats.get("comment_count") if stats else 0,
-                        "status": "ok" if stats else "partial",
-                        "diag": (f"resolver={resolver_used}; stats={'ok' if stats else 'empty'}; captions={'on' if fetch_captions_manual_opt and cap else 'off'}") if show_diag_manual_opt else "",
+                        "Total Views": play_count,
+                        "Total Likes": like_count,
+                        "Total Comments": comment_count,
+                        "status": status,
+                        "diag": (f"resolver={resolver_used}; play_count={'✓' if play_count else '✗'}; stats={'✓' if stats else '✗'}") if show_diag_manual_opt else "",
                     }
+                    
+                    # Store debug info from Strategy 0 for display after thread completes
+                    if show_diag_manual_opt and i == 0 and stats_graphql_result:
+                        if stats_graphql_result.get("_debug"):
+                            result_dict["_debug_info"] = stats_graphql_result.get("_debug")
+                            result_dict["_debug_error"] = stats_graphql_result.get("_error")
+                            result_dict["_debug_response"] = {k: v for k, v in stats_graphql_result.items() if not k.startswith("_")}
+                    
+                    return result_dict
 
                 completed = 0
                 rows_by_index: Dict[int, Dict[str, Any]] = {}
+                debug_info_collected = None
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     futures_map = {ex.submit(process_one, i): i for i in range(total)}
                     for fut in as_completed(futures_map):
                         idx = futures_map[fut]
                         try:
                             res = fut.result()
+                            # Collect debug info from first item if available
+                            if idx == 0 and res.get("_debug_info"):
+                                debug_info_collected = {
+                                    "debug_messages": res.get("_debug_info", []),
+                                    "error": res.get("_debug_error"),
+                                    "response": res.get("_debug_response"),
+                                }
+                                # Remove debug fields from result dict before adding to dataframe
+                                for key in ["_debug_info", "_debug_error", "_debug_response"]:
+                                    res.pop(key, None)
                         except Exception as e:
                             res = {
                                 "Reel Link": "",
+                                "Media ID": "",
                                 "posted_on": "",
                                 "caption": "",
                                 "media_type": "",
@@ -1511,6 +2313,22 @@ with tab_reels:
                             except Exception:
                                 pass
                             prog.progress(min(completed / total, 1.0))
+                
+                # Display debug info AFTER all threads complete (in main Streamlit context)
+                if show_diag_manual_opt and debug_info_collected:
+                    st.markdown("---")
+                    with st.expander("🔍 Strategy 0 Debug Info (from first reel)", expanded=True):
+                        st.write("**Debug Messages:**")
+                        for msg in debug_info_collected.get("debug_messages", []):
+                            st.text(msg)
+                        
+                        if debug_info_collected.get("error"):
+                            st.error(f"**Error:** {debug_info_collected.get('error')}")
+                        
+                        if debug_info_collected.get("response"):
+                            st.write("**Response Data:**")
+                            st.json(debug_info_collected.get("response"))
+                            
             if rows_by_index:
                 ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
                 df_batch = _ensure_arrow_safe(pd.DataFrame(ordered))

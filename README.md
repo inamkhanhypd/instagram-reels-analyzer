@@ -1,11 +1,11 @@
 # Instagram Reels Analyzer
 
-A sleek Streamlit web application for analyzing Instagram Reels data. This tool allows you to fetch detailed statistics for Instagram Reels using your own Instagram session cookies.
+A sleek Streamlit web application for analyzing Instagram Reels data. This tool allows you to fetch detailed statistics for Instagram Reels. **For profile analysis, cookies are NOT required.** For individual Reel stats resolution, you **need to paste your Instagram cookie**.
 
 ## Features
 
-- **Analyze Profile**: Enter any Instagram username or profile URL to fetch the latest 5 Reels with detailed stats
-- **Analyze Reels**: Batch process multiple Reel URLs/shortcodes to get comprehensive data
+- **Analyze Profile**: Enter any Instagram username or profile URL to fetch the latest Reels with play/view counts (**no cookies required**)
+- **Analyze Reels**: Batch process multiple Reel URLs/shortcodes to get comprehensive data (**cookies required**)
 - **Comprehensive Data**: Get media ID, shortcode, play count, like count, comment count, owner info, captions, and more
 - **Real-time Processing**: Incremental display of results as they're fetched
 - **CSV Export**: Download results as CSV files
@@ -62,17 +62,18 @@ streamlit run app.py
 
 2. Open your browser and go to `http://localhost:8501`
 
-3. Get your Instagram cookies:
+3. Get your Instagram cookies (required for Reel analysis; not needed for profile analysis):
    - Open Instagram in your browser
    - Open DevTools (F12)
    - Go to Network tab
    - Make any request (refresh the page)
    - Copy the full Cookie header from any XHR request
-   - Minimal setup: copying just your `sessionid` value is typically sufficient
+   - **Recommended**: Paste the entire Cookie header for best results
+   - **Alternative**: You can also paste just `sessionid=<your_session_id>`
 
 4. Paste your cookies in the "Cookie header" field
-   - You can paste either the full Cookie header, or just `sessionid=<your_session_id>`
-   - Using the full Cookie can improve reliability in some environments, but is not strictly required
+   - **Profile analysis**: Leave this empty (works without cookies)
+   - **Reel analysis**: Paste your full Cookie header or just `sessionid=<your_session_id>`
 
 5. Use either tab:
    - **Analyze Profile**: Enter username or profile URL
@@ -80,7 +81,8 @@ streamlit run app.py
 
 ## Important Notes
 
-- This tool requires valid Instagram session cookies to work
+- Profile analysis uses Instagram's `api/v1/clips/user/` and does NOT require cookies for public accounts
+- Reel-by-reel detail endpoints may require a valid session; using just `sessionid` is typically enough
 - Cookies expire, so you may need to refresh them periodically
 - The tool respects Instagram's rate limits with built-in throttling
 - Only works with public Instagram accounts and Reels

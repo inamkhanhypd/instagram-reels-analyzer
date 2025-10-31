@@ -68,8 +68,11 @@ streamlit run app.py
    - Go to Network tab
    - Make any request (refresh the page)
    - Copy the full Cookie header from any XHR request
+   - Minimal setup: copying just your `sessionid` value is typically sufficient
 
 4. Paste your cookies in the "Cookie header" field
+   - You can paste either the full Cookie header, or just `sessionid=<your_session_id>`
+   - Using the full Cookie can improve reliability in some environments, but is not strictly required
 
 5. Use either tab:
    - **Analyze Profile**: Enter username or profile URL
@@ -99,10 +102,12 @@ MIT License - see LICENSE file for details
 - **Input**: Reel URL or shortcode (e.g., `https://www.instagram.com/reel/ABC123/`, `ABC123`).
 - **Extract**: Use regex `/(?:reel|p)/([A-Za-z0-9_]+)/?` and sanitize to `[A-Za-z0-9_]`.
 
-2) Require a valid Instagram Cookie header
-- **How**: Browser DevTools → Network on `instagram.com`, copy full `Cookie` from any XHR.
-- **Important cookies**: `sessionid`, `csrftoken`, `ds_user_id` (and the rest as copied).
-- **Tip**: Also forward `x-csrftoken` header when available.
+2) Require a valid Instagram session (Cookie)
+- **Minimum needed**: `sessionid` is typically sufficient for read access to public media.
+- **How**: Browser DevTools → Network on `instagram.com`, copy either the full `Cookie` header or just the `sessionid` value.
+- **Optional (can improve reliability)**: `csrftoken`, `ds_user_id` and other cookies; if you have `csrftoken`, also forward it via `x-csrftoken` header.
+  - Example minimal header: `cookie: sessionid=YOUR_SESSION_ID`
+  - Example full header: `cookie: sessionid=...; csrftoken=...; ds_user_id=...; ...`
 
 3) Prepare a shared HTTP session and base headers
 - **Base headers**: `user-agent` (real browser UA), `accept: */*`.

@@ -1,11 +1,18 @@
 # Version management for Instagram Reels Analyzer
-VERSION = "1.3.3"
-BUILD_DATE = "2025-10-30"
+VERSION = "1.4.0"
+BUILD_DATE = "2025-11-02"
 CHANGELOG = {
-    "1.3.1": {
-        "date": "2025-10-30",
+    "1.4.0": {
+        "date": "2025-11-02",
         "changes": [
-            "Maintenance release to ship latest fixes and improvements"
+            "Analyze Profiles: Removed fetch captions and diagnostics checkboxes",
+            "Analyze Profiles: Added profile info card with followers, following, posts, and bio",
+            "Analyze Profiles: Added caption column to results table",
+            "Analyze Profiles: Removed diag column from results table",
+            "Analyze Reels: Removed fetch captions checkbox",
+            "Analyze Reels: Disabled diagnostics button",
+            "UI: Restructured Analyze Reels with CSV upload as Option 1 and manual input as Option 2",
+            "Performance: Optimized IP fetching with caching to prevent slowdowns"
         ]
     },
     "1.3.3": {
@@ -13,6 +20,12 @@ CHANGELOG = {
         "changes": [
             "CSV: Added batch size and pause-between-batches controls (10–20s recommended)",
             "CSV: Internal batching with per-batch ID resolution and progress"
+        ]
+    },
+    "1.3.1": {
+        "date": "2025-10-30",
+        "changes": [
+            "Maintenance release to ship latest fixes and improvements"
         ]
     },
     "1.3.2": {

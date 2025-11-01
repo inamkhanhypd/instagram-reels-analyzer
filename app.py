@@ -179,7 +179,6 @@ def fetch_play_count_with_cookies(reel_url: str, cookie_header: str) -> Optional
 # ----------------------------
 # Fetch CSRF token from Instagram homepage (public, no auth needed)
 # ----------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_csrf_token_from_homepage() -> Optional[str]:
     """Fetch CSRF token from Instagram's homepage HTML. This is publicly accessible."""
     try:
@@ -214,9 +213,184 @@ def fetch_csrf_token_from_homepage() -> Optional[str]:
                     # Validate it looks like a token (alphanumeric and reasonably long)
                     if len(token) >= 10 and len(token) <= 50:
                         return token
-    except Exception:
+    except Exception as e:
+        # Log the error for debugging
         pass
     return None
+
+# ----------------------------
+# GraphQL: Direct reel metrics fetch (no auth, public content)
+# ----------------------------
+_cached_public_ip = None
+
+def get_public_ip() -> str:
+    """Get the public IP address of the machine. Cached per application run."""
+    global _cached_public_ip
+    if _cached_public_ip is None:
+        try:
+            response = requests.get('https://api.ipify.org', timeout=5)
+            if response.ok:
+                _cached_public_ip = response.text.strip()
+            else:
+                _cached_public_ip = 'N/A'
+        except Exception:
+            _cached_public_ip = 'N/A'
+    return _cached_public_ip
+
+def fetch_reel_metrics_public(
+    shortcode: str,
+    max_retries: int = 3,
+) -> Dict[str, Any]:
+    """Fetch video_view_count and video_play_count for an Instagram Reel without authentication.
+    
+    Uses Instagram's public GraphQL endpoint with doc_id=8845758582119845.
+    
+    Args:
+        shortcode: Instagram reel shortcode (e.g., "DQcHMG1kmbq")
+        max_retries: Maximum retry attempts on 403 errors
+    
+    Returns:
+        dict: {'video_view_count': int, 'video_play_count': int, ...} or {} on failure
+    """
+    debug_info = []
+    last_status_code = None
+    
+    def debug_log(msg: str):
+        debug_info.append(msg)
+    
+    try:
+        # Create session
+        session = requests.Session()
+        
+        # Set initial headers
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.8'
+        })
+        
+        # Step 1: Get CSRF token
+        debug_log("Fetching CSRF token from Instagram homepage")
+        homepage_resp = session.get('https://www.instagram.com/', timeout=30)
+        if not homepage_resp.ok:
+            debug_log(f"Failed to fetch homepage: {homepage_resp.status_code}")
+            return {'_status_code': homepage_resp.status_code}
+        
+        csrf_tokens = [c.value for c in session.cookies if c.name == 'csrftoken']
+        csrf_token = csrf_tokens[-1] if csrf_tokens else None
+        
+        if not csrf_token:
+            debug_log("No CSRF token found in cookies")
+            return {'_status_code': 'no_csrf_token'}
+        
+        debug_log(f"Got CSRF token: {csrf_token[:20]}...")
+        
+        # Step 2: Query reel metrics with retries
+        url = "https://www.instagram.com/graphql/query/"
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRFToken': csrf_token,
+            'X-Instagram-AJAX': '1',
+            'Referer': 'https://www.instagram.com/',
+            'Origin': 'https://www.instagram.com',
+            'authority': 'www.instagram.com'
+        }
+        
+        data = {
+            'doc_id': '8845758582119845',
+            'variables': json.dumps({'shortcode': shortcode}),
+            'server_timestamps': 'true'
+        }
+        
+        debug_log(f"Querying GraphQL endpoint with doc_id=8845758582119845")
+        debug_log(f"Variables: {data['variables']}")
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                debug_log(f"Attempt {attempt}/{max_retries}")
+                response = session.post(url, headers=headers, data=data, timeout=30)
+                last_status_code = response.status_code
+                
+                if response.status_code == 200:
+                    resp_json = response.json()
+                    debug_log(f"Response JSON keys: {list(resp_json.keys())}")
+                    if resp_json.get('status') == 'ok':
+                        media = resp_json.get('data', {}).get('xdt_shortcode_media')
+                        debug_log(f"Media keys: {list(media.keys()) if media else 'None'}")
+                        if media:
+                            debug_log("Successfully fetched reel metrics")
+                            
+                            # Debug: Log raw response for diagnosis
+                            debug_log(f"Raw media response preview: {json.dumps(media, indent=2)[:2000]}")
+                            
+                            # Extract like and comment counts
+                            like_count = ((media.get('edge_liked_by') or {}).get('count') or 
+                                         (media.get('edge_media_preview_like') or {}).get('count') or 
+                                         0)
+                            comment_count = ((media.get('edge_media_preview_comment') or {}).get('count') or 
+                                           (media.get('edge_media_to_comment') or {}).get('count') or 
+                                           0)
+                            
+                            # Extract taken_at_timestamp
+                            taken_at_timestamp = media.get('taken_at_timestamp')
+                            try:
+                                posted_on = datetime.fromtimestamp(int(taken_at_timestamp), timezone.utc).strftime("%Y-%m-%d") if taken_at_timestamp else None
+                            except Exception:
+                                posted_on = None
+                            
+                            result = {
+                                'id': media.get('id'),  # Media ID
+                                'video_view_count': media.get('video_view_count'),
+                                'video_play_count': media.get('video_play_count'),
+                                'shortcode': media.get('shortcode'),
+                                'play_count': media.get('video_play_count'),  # Use video_play_count for Total Views column
+                                'like_count': like_count,
+                                'comment_count': comment_count,
+                                'taken_at_timestamp': taken_at_timestamp,
+                                'posted_on': posted_on,
+                                '_debug': debug_info
+                            }
+                            debug_log(f"Returning result: view={result['play_count']}, like={like_count}, comment={comment_count}")
+                            return result
+                        else:
+                            debug_log("Response OK but no xdt_shortcode_media in data")
+                            debug_log(f"Data keys: {list(resp_json.get('data', {}).keys())}")
+                            debug_log(f"Full data: {json.dumps(resp_json.get('data', {}), indent=2)[:1000]}")
+                    else:
+                        debug_log(f"Response status not OK: {resp_json.get('status')}")
+                        debug_log(f"Full response: {json.dumps(resp_json, indent=2)[:1000]}")
+                elif response.status_code == 403 and attempt < max_retries:
+                    # Refresh session and retry
+                    debug_log(f"403 Forbidden, refreshing session (attempt {attempt})")
+                    import time
+                    time.sleep(2)
+                    homepage_resp = session.get('https://www.instagram.com/', timeout=30)
+                    csrf_tokens = [c.value for c in session.cookies if c.name == 'csrftoken']
+                    csrf_token = csrf_tokens[-1] if csrf_tokens else csrf_token
+                    headers['X-CSRFToken'] = csrf_token
+                    debug_log(f"New CSRF token: {csrf_token[:20]}...")
+                    continue
+                else:
+                    debug_log(f"Non-200/403 status code: {response.status_code}")
+                    debug_log(f"Response text: {response.text[:500]}")
+                    return {'_status_code': response.status_code}
+                    
+            except Exception as e:
+                if attempt < max_retries:
+                    debug_log(f"Exception on attempt {attempt}: {type(e).__name__}: {e}")
+                    import time
+                    time.sleep(2)
+                    continue
+                debug_log(f"Exception on final attempt: {type(e).__name__}: {e}")
+                return {'_status_code': f'Exception: {type(e).__name__}'}
+        
+        # All retries exhausted
+        debug_log("All retry attempts exhausted")
+        return {'_status_code': last_status_code if last_status_code else 'retry_exhausted'}
+        
+    except Exception as e:
+        debug_log(f"Exception in fetch_reel_metrics_public: {type(e).__name__}: {e}")
+        return {'_status_code': f'Exception: {type(e).__name__}'}
 
 # ----------------------------
 # GraphQL: Profile Reels tab (per your cURL)
@@ -730,12 +904,33 @@ def fetch_reel_stats_via_graphql(
             data_bulk["lsd"] = lsd_token
             debug_log(f"Added lsd to data payload")
         
-        resp_bulk = get_shared_session().post(
-            "https://www.instagram.com/ajax/bulk-route-definitions/",
-            headers=headers_bulk,
-            data=data_bulk,
-            timeout=20,
-        )
+        # Try bulk route with timeout and retry
+        resp_bulk = None
+        for attempt in range(2):
+            try:
+                resp_bulk = get_shared_session().post(
+                    "https://www.instagram.com/ajax/bulk-route-definitions/",
+                    headers=headers_bulk,
+                    data=data_bulk,
+                    timeout=30 if attempt == 0 else 60,
+                )
+                break
+            except requests.exceptions.Timeout:
+                if attempt == 0:
+                    debug_log(f"⚠️ Timeout on attempt {attempt + 1}, retrying...")
+                    continue
+                else:
+                    debug_log(f"❌ Timeout on attempt {attempt + 1}, giving up")
+                    raise
+        
+        if not resp_bulk:
+            error_msg = "Failed to get response from bulk-route (timeout/connection error)"
+            debug_log(error_msg)
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
         
         if not resp_bulk.ok:
             error_msg = f"Bulk route failed: {resp_bulk.status_code} - {resp_bulk.text[:200]}"
@@ -790,6 +985,9 @@ def fetch_reel_stats_via_graphql(
         payload = j_bulk.get("payload") or {}
         payloads = payload.get("payloads") or {}
         
+        debug_log(f"📋 Full response payload keys: {list(payload.keys())}")
+        debug_log(f"📋 Payloads keys: {list(payloads.keys())}")
+        
         # Try exact match first
         route_obj = payloads.get(route_path) or {}
         
@@ -805,16 +1003,35 @@ def fetch_reel_stats_via_graphql(
         else:
             debug_log(f"Using exact route key match: {route_path}")
         
+        # Check for errors in the response first
+        if route_obj.get("error"):
+            error_value = route_obj.get("error")
+            error_msg = f"Bulk route returned error: {error_value}"
+            debug_log(error_msg)
+            # Also log the full route_obj to see what we're getting
+            debug_log(f"Full route_obj: {route_obj}")
+            result = {}
+            if debug:
+                result["_debug"] = debug_info
+                result["_error"] = error_msg
+            return result
+        
         # Handle both possible structures - try multiple paths
         result = route_obj.get("result") or {}
+        
+        # Path 0: Try route_obj directly (data might be at top level)
+        media_id = route_obj.get("media_id")
+        owner_id = route_obj.get("owner_id")
         
         # Path 1: result.exports.rootView.props
         exports = result.get("exports") or {}
         root_view = exports.get("rootView") or {}
         props = root_view.get("props") or {}
         
-        media_id = props.get("media_id")
-        owner_id = props.get("owner_id")
+        if not media_id:
+            media_id = props.get("media_id")
+        if not owner_id:
+            owner_id = props.get("owner_id")
         
         # Path 2: Try direct result.props if Path 1 didn't work
         if not media_id or not owner_id:
@@ -838,6 +1055,10 @@ def fetch_reel_stats_via_graphql(
         debug_log(f"Found route key: {found_route_key}")
         debug_log(f"Available payload keys: {list(payloads.keys())}")
         debug_log(f"Route_obj keys: {list(route_obj.keys())}")
+        # Log the actual error value if it exists
+        if "error" in route_obj:
+            debug_log(f"⚠️ Route_obj error field value: {repr(route_obj.get('error'))}")
+            debug_log(f"⚠️ Full route_obj structure: {json.dumps(route_obj, indent=2)[:1000]}")
         debug_log(f"Result keys: {list(result.keys())}")
         if exports:
             debug_log(f"Exports keys: {list(exports.keys())}")
@@ -883,6 +1104,14 @@ def fetch_reel_stats_via_graphql(
                         break
             
             debug_log(f"After regex fallback - media_id: {media_id}, owner_id: {owner_id}")
+            
+            # If still no media_id after regex, try oEmbed as last fallback
+            if not media_id:
+                debug_log("Trying oEmbed as fallback to get media_id")
+                media_id_oembed = fetch_media_id_via_oembed(shortcode, cookie_header if cookie_header else "")
+                if media_id_oembed:
+                    media_id = media_id_oembed
+                    debug_log(f"Found media_id via oEmbed: {media_id}")
             
             if not media_id or not owner_id:
                 error_msg = f"Failed to extract media_id or owner_id from bulk route response. Route key found: {found_route_key}, Route obj empty: {not route_obj}"
@@ -1016,8 +1245,7 @@ def fetch_reel_stats_via_graphql(
             # Match by media_id (exact match)
             if node_id == media_id_str:
                 debug_log(f"Matched node! video_view_count: {node.get('video_view_count')}")
-                # Extract stats
-                video_view_count = node.get("video_view_count")
+                # Extract stats from GraphQL for likes/comments
                 like_count = ((node.get("edge_media_preview_like") or {}).get("count") or 0)
                 comment_count = ((node.get("edge_media_to_comment") or {}).get("count") or 0)
                 taken_at = node.get("taken_at_timestamp")
@@ -1033,6 +1261,50 @@ def fetch_reel_stats_via_graphql(
                         posted_on = datetime.fromtimestamp(int(taken_at), timezone.utc).strftime("%Y-%m-%d")
                 except Exception:
                     pass
+                
+                # Fetch view_count from media API instead of GraphQL
+                video_view_count = None
+                try:
+                    if cookie_header:
+                        # Use media API to fetch view count
+                        media_url = f"https://www.instagram.com/api/v1/media/{media_id_str}/info/"
+                        def _extract_cookie_value(cookie_str: str, key: str) -> Optional[str]:
+                            try:
+                                parts = [p.strip() for p in cookie_str.split(';')]
+                                for p in parts:
+                                    if p.startswith(key + "="):
+                                        return p.split('=', 1)[1]
+                            except Exception:
+                                return None
+                            return None
+                        
+                        csrf = _extract_cookie_value(cookie_header, "csrftoken")
+                        media_headers = {
+                            "accept": "*/*",
+                            "user-agent": "Mozilla/5.0",
+                            "x-ig-app-id": "936619743392459",
+                            "x-requested-with": "XMLHttpRequest",
+                            "cookie": cookie_header,
+                            "referer": f"https://www.instagram.com/reel/{shortcode_found or shortcode}/",
+                        }
+                        if csrf:
+                            media_headers["x-csrftoken"] = csrf
+                        
+                        resp_media = requests.get(media_url, headers=media_headers, timeout=20)
+                        if resp_media.ok:
+                            media_data = resp_media.json()
+                            media_item = (media_data.get("items") or [None])[0] or media_data
+                            video_view_count = (
+                                media_item.get("play_count") 
+                                or media_item.get("video_play_count") 
+                                or media_item.get("view_count") 
+                                or media_item.get("video_view_count")
+                            )
+                            debug_log(f"Fetched video_view_count from media API: {video_view_count}")
+                except Exception as e:
+                    debug_log(f"Failed to fetch view_count from media API: {type(e).__name__}: {e}")
+                    # Fall back to GraphQL value if media API fails
+                    video_view_count = node.get("video_view_count")
                 
                 result = {
                     "play_count": video_view_count,
@@ -1172,6 +1444,41 @@ def fetch_user_id_public(username: str) -> Optional[str]:
         return user_id
     except Exception:
         return None
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_profile_details(username: str) -> Dict[str, Any]:
+    """Fetch full profile details including picture, followers, following, and bio."""
+    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    headers = {
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "x-ig-app-id": "936619743392459",
+        "x-ig-www-claim": "0",
+        "x-requested-with": "XMLHttpRequest",
+        "referer": f"https://www.instagram.com/{username}/",
+        "origin": "https://www.instagram.com",
+    }
+    resp = get_shared_session().get(url, headers=headers, timeout=20)
+    if not resp.ok:
+        return {}
+    try:
+        data = resp.json()
+        user_data = (((data or {}).get("data") or {}).get("user") or {})
+        # Try multiple possible field names for profile picture
+        pic_url = (user_data.get("profile_pic_url_hd") 
+                  or user_data.get("profile_pic_url") 
+                  or user_data.get("profile_pic_url_hd_2") 
+                  or user_data.get("profile_pic_url_hd_url"))
+        return {
+            "profile_pic_url": pic_url,
+            "followers": user_data.get("edge_followed_by", {}).get("count", 0),
+            "following": user_data.get("edge_follow", {}).get("count", 0),
+            "bio": user_data.get("biography", ""),
+            "full_name": user_data.get("full_name", ""),
+        }
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_profile_media_count(username: str) -> Optional[int]:
@@ -1453,7 +1760,6 @@ tab_profile, tab_reels = st.tabs(["Analyze Profile", "Analyze Reels"])
 
 with tab_profile:
     st.subheader("Analyze Profile")
-    fetch_captions_profile = st.checkbox("Fetch captions (slower)", value=False, key="profile_fetch_captions")
     # Hide diagnostics in production (safe even if no secrets)
     def _is_prod() -> bool:
         env_from_os = (os.getenv("ENV") or os.getenv("STREAMLIT_ENV") or "").lower()
@@ -1465,10 +1771,8 @@ with tab_profile:
             env_from_secrets = ""
         return env_from_secrets == "prod"
     IS_PROD = _is_prod()
-    if not IS_PROD:
-        show_diag_profile = st.checkbox("Show diagnostics", value=False, key="profile_show_diag")
-    else:
-        show_diag_profile = False
+    show_diag_profile = False  # Disabled
+    fetch_captions_profile = False  # Disabled
     
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -1535,6 +1839,7 @@ with tab_profile:
                 st.info(f"🌐 Your IP: {ip_data.get('ip', 'Unknown')}")
         except:
             pass
+    
     # no refresh button; cache clears automatically on Clear
 
     if username_to_use and fetch_clicked:
@@ -1558,6 +1863,9 @@ with tab_profile:
                             st.session_state["profile_user_id"] = user_id
                             st.session_state["profile_username_current"] = username_to_use
                             st.session_state["profile_media_count"] = fetch_profile_media_count(username_to_use)
+                            # Fetch full profile details
+                            profile_details = fetch_profile_details(username_to_use)
+                            st.session_state["profile_details"] = profile_details
                             st.success(f"Loaded profile @{username_to_use}")
 
                 except PermissionError as pe:
@@ -1573,8 +1881,30 @@ with tab_profile:
 
     # If a profile is loaded, show count, fetch size and Process
     if st.session_state.get("profile_user_id") and st.session_state.get("profile_username_current"):
-        if st.session_state.get("profile_media_count") is not None:
-            st.info(f"Total media on profile: {st.session_state['profile_media_count']}")
+        # Display profile info card
+        profile_details = st.session_state.get("profile_details", {})
+        if profile_details:
+            st.markdown("### Profile Info")
+            username_display = st.session_state.get("profile_username_current", "")
+            full_name = profile_details.get("full_name", "")
+            st.markdown(f"**{full_name if full_name else username_display}**")
+            st.markdown(f"@{username_display}")
+            
+            stats_col1, stats_col2, stats_col3 = st.columns(3)
+            with stats_col1:
+                st.metric("Followers", f"{profile_details.get('followers', 0):,}")
+            with stats_col2:
+                st.metric("Following", f"{profile_details.get('following', 0):,}")
+            with stats_col3:
+                media_count = st.session_state.get("profile_media_count", 0)
+                st.metric("Posts", f"{media_count:,}" if media_count else "0")
+            
+            bio = profile_details.get("bio", "")
+            if bio:
+                st.markdown(f"📝 {bio}")
+        
+        st.markdown("---")
+        
         default_count = 5
         max_fetch = st.number_input(
             "How many media to fetch?",
@@ -1614,15 +1944,13 @@ with tab_profile:
                     # Sometimes the response structure is different
                     resp_items = resp.get("data", {}).get("items") or []
                 
-                # Debug: Show what we got (always show first item structure for debugging)
-                if resp_items and not IS_PROD:
-                    with st.expander("🔍 Debug: Response Structure (click to view)", expanded=False):
-                        st.json({"sample_item": resp_items[0], "total_items": len(resp_items)})
+                # Debug removed per user request
                 
                 for it in resp_items[: int(max_fetch)]:
                     media = (it or {}).get("media") or it or {}
                     shortcode = media.get("code") or media.get("shortcode") or ""
                     media_pk = media.get("pk") or media.get("id") or ""
+                    
                     # Try multiple possible field names for counts
                     like_count = (
                         media.get("like_count") 
@@ -1646,6 +1974,20 @@ with tab_profile:
                     taken_at = (
                         datetime.fromtimestamp(int(ts), timezone.utc) if ts else datetime.now(timezone.utc)
                     )
+                    # Get caption from media - check multiple possible field structures
+                    caption = ""
+                    # Try edge_media_to_caption first (GraphQL structure)
+                    if media.get("edge_media_to_caption"):
+                        edges = media.get("edge_media_to_caption", {}).get("edges", [])
+                        if edges and len(edges) > 0:
+                            caption = edges[0].get("node", {}).get("text", "")
+                    # If not found, try direct caption field
+                    elif media.get("caption"):
+                        if isinstance(media.get("caption"), str):
+                            caption = media.get("caption")
+                        elif isinstance(media.get("caption"), dict):
+                            caption = media.get("caption", {}).get("text", "")
+                    
                     items.append(
                             {
                                 "shortcode": shortcode,
@@ -1655,6 +1997,7 @@ with tab_profile:
                             "comments": comment_count or 0,
                             "video_view_count": play_count or 0,
                                 "taken_at_timestamp": taken_at,
+                                "caption": caption,
                             }
                         )
 
@@ -1682,7 +2025,7 @@ with tab_profile:
                     def process_one(i: int) -> Dict[str, Any]:
                         it = items[i]
                         sc = it.get("shortcode") or ""
-                        cap = ""
+                        cap = it.get("caption", "")
                         return {
                             "Reel Link": f"https://www.instagram.com/reel/{sc}/" if sc else "",
                             "posted_on": it.get("taken_at_timestamp").strftime("%Y-%m-%d") if it.get("taken_at_timestamp") else "",
@@ -1692,7 +2035,6 @@ with tab_profile:
                             "Total Likes": int(it.get("likes") or 0),
                             "Total Comments": int(it.get("comments") or 0),
                             "status": "ok",
-                            "diag": "source=clips/user" if show_diag_profile else "",
                         }
 
                     completed = 0
@@ -1755,193 +2097,234 @@ with tab_reels:
     if "reels_manual_processing" not in st.session_state:
         st.session_state["reels_manual_processing"] = False
     
-    # CSV Upload Section
-    st.markdown("**Option 1: Upload CSV of Reel Links**")
-    uploaded_file = st.file_uploader(
+    st.markdown("**Option 1: Bulk Upload (CSV)**")
+    
+    uploaded_file_bulk = st.file_uploader(
         "Choose a CSV file with reel links",
         type="csv",
         help="CSV should have a column with Instagram reel URLs (e.g., 'https://www.instagram.com/reel/ABC123/')",
-        key="csv_uploader"
+        key="bulk_csv_uploader"
     )
     
-    if uploaded_file is not None:
+    if uploaded_file_bulk is not None:
         try:
             # Read CSV
-            df_uploaded = pd.read_csv(uploaded_file)
-            st.success(f"✅ CSV uploaded successfully! Found {len(df_uploaded)} rows.")
+            df_uploaded_bulk = pd.read_csv(uploaded_file_bulk)
+            st.success(f"✅ CSV uploaded successfully! Found {len(df_uploaded_bulk)} rows.")
             
             # Find the column with reel links
-            reel_links = []
-            for col in df_uploaded.columns:
-                if df_uploaded[col].astype(str).str.contains('instagram.com/reel/', na=False).any():
-                    reel_links = df_uploaded[col].dropna().tolist()
+            reel_links_bulk = []
+            for col in df_uploaded_bulk.columns:
+                if df_uploaded_bulk[col].astype(str).str.contains('instagram.com/reel/', na=False).any():
+                    reel_links_bulk = df_uploaded_bulk[col].dropna().tolist()
                     st.info(f"📊 Found reel links in column: '{col}'")
                     break
             
-            if not reel_links:
+            if not reel_links_bulk:
                 st.error("❌ No Instagram reel links found in the CSV. Please ensure your CSV contains URLs like 'https://www.instagram.com/reel/ABC123/'")
             else:
-                st.write(f"🔗 Processing {len(reel_links)} reel links...")
-                
-                # Batch controls for large CSVs
-                cfg1, cfg2 = st.columns([1,1])
-                with cfg1:
-                    csv_batch_size = st.number_input("Batch size", min_value=50, max_value=2000, step=50, value=300, key="csv_batch_size")
-                with cfg2:
-                    csv_pause_secs = st.number_input("Pause secs between batches", min_value=0, max_value=120, step=5, value=15, key="csv_pause_secs")
-
-                # Captions toggle and diagnostics (hidden on prod)
-                fetch_captions_csv = st.checkbox("Fetch captions (slower)", value=False, key="csv_fetch_captions")
-                if not IS_PROD:
-                    show_diag_csv = st.checkbox("Show diagnostics", value=False, key="csv_show_diag")
-                else:
-                    show_diag_csv = False
-                if st.button("Process CSV Reel Links", type="primary", key="process_csv"):
+                st.write(f"🔗 Found {len(reel_links_bulk)} reel links...")
+                if st.button("Process Bulk Upload", type="primary", key="bulk_upload_process"):
+                    # Note about cookies
                     if not cookie_header_global:
-                        st.error("Cookie header is required. Paste your Instagram Cookie header above.")
+                        st.warning("⚠️ **Note:** Cookie header is empty. Without cookies, Instagram returns cached data (may be hours old). For real-time data, provide your Instagram session cookie above.")
                     else:
-                        with st.spinner("Processing CSV reel links..."):
-                            st.session_state["reels_csv_processing"] = True
-                            rows = []
-                            total = len(reel_links)
-                            prog = st.progress(0)
-                            table_ph = st.empty()
-                            def _ensure_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
-                                for col in ["Total Views", "Total Likes", "Total Comments"]:
-                                    if col in df.columns:
-                                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
-                                return df
+                        st.info("✅ Using cookies - fetching real-time data.")
+                    
+                    rows_bulk: List[Dict[str, Any]] = []
+                    table_ph_bulk = st.empty()
+                    dl_ph_bulk = st.empty()
+                    prog_bulk = st.progress(0)
+                    total_bulk = len(reel_links_bulk)
+                    
+                    with st.spinner("Processing bulk upload..."):
+                        def _ensure_arrow_safe_bulk(df: pd.DataFrame) -> pd.DataFrame:
+                            for col in ["Total Views", "Total Likes", "Total Comments"]:
+                                if col in df.columns:
+                                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
+                            return df
+                        
+                        # Resolve IDs - try with cookies if available
+                        shortcodes_bulk = [extract_shortcode(link) or link for link in reel_links_bulk]
+                        id_map_bulk = {}
+                        if cookie_header_global:
+                            try:
+                                id_map_bulk = bulk_fetch_media_ids(shortcodes_bulk, cookie_header_global)
+                            except Exception:
+                                id_map_bulk = {}
+                        
+                        from concurrent.futures import ThreadPoolExecutor, as_completed
+                        max_workers = 8
+                        def process_one_bulk(i: int) -> Dict[str, Any]:
+                            link = reel_links_bulk[i]
+                            sc = shortcodes_bulk[i]
+                            media_id = id_map_bulk.get(sc)
                             
-                            # Prepare shortcodes and process in batches
-                            shortcodes = [extract_shortcode(link) or link for link in reel_links]
-                            from concurrent.futures import ThreadPoolExecutor, as_completed
-                            max_workers = 8
-
-                            def process_one_global(i: int, id_map_batch: Dict[str, Optional[str]]) -> Dict[str, Any]:
-                                link = reel_links[i]
-                                sc = shortcodes[i]
-                                media_id = id_map_batch.get(sc)
-                                resolver_used = "bulk"
+                            # Try to get media_id even without cookies
+                            if not media_id:
+                                if cookie_header_global:
+                                    try:
+                                        media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
+                                    except Exception:
+                                        pass
                                 if not media_id:
-                                    media_id = resolve_media_id_with_fallback(sc, cookie_header_global)
-                                    if not media_id:
-                                        return {
-                                            "Reel Link": link,
-                                            "Media ID": "",
-                                            "posted_on": "",
-                                            "caption": "",
-                                            "media_type": "",
-                                            "Total Views": 0,
-                                            "Total Likes": 0,
-                                            "Total Comments": 0,
-                                            "status": "not found",
-                                            "diag": "resolver=none" if show_diag_csv else "",
-                                        }
-                                ref = f"https://www.instagram.com/p/{sc}/"
-                                try:
-                                    stats = fetch_media_stats_by_pk(media_id, cookie_header_global, referer_url=ref)
-                                except Exception:
-                                    stats = {}
-                                if not stats:
-                                    # Final fallback: parse counts directly from shortcode resolver
                                     try:
-                                        item = resolve_media_by_shortcode(sc, cookie_header_global)
-                                        stats = parse_stats_from_item(item)
-                                        resolver_used = resolver_used + "+shortcode"
+                                        item = resolve_media_by_shortcode(sc, cookie_header_global if cookie_header_global else "")
+                                        if item:
+                                            media_id = item.get("id") or item.get("pk")
+                                            if media_id and isinstance(media_id, str) and "_" in media_id:
+                                                media_id = media_id.split("_")[0]
                                     except Exception:
-                                        stats = {}
-                                cap = ""
-                                if fetch_captions_csv:
-                                    try:
-                                        cap = fetch_caption_by_media_pk(media_id, cookie_header_global, referer_url=ref) or ""
-                                    except Exception:
-                                        cap = ""
-                                media_id_final_csv = stats.get("media_id") if stats else media_id
-                                return {
-                                    "Reel Link": link,
-                                    "Media ID": media_id_final_csv if media_id_final_csv else "",
-                                    "posted_on": stats.get("posted_on") if stats else "",
-                                    "caption": cap,
-                                    "media_type": (stats.get("product_type") or stats.get("media_type")) if stats else "",
-                                    "Total Views": stats.get("play_count") if stats else 0,
-                                    "Total Likes": stats.get("like_count") if stats else 0,
-                                    "Total Comments": stats.get("comment_count") if stats else 0,
-                                    "status": "ok" if stats else "partial",
-                                    "diag": (f"resolver={resolver_used}; stats={'ok' if stats else 'empty'}; captions={'on' if fetch_captions_csv and cap else 'off'}") if show_diag_csv else "",
-                                }
-
-                            completed = 0
-                            rows_by_index: Dict[int, Dict[str, Any]] = {}
-
-                            for start_i in range(0, total, int(csv_batch_size)):
-                                end_i = min(start_i + int(csv_batch_size), total)
-                                batch_indices = list(range(start_i, end_i))
-                                # Resolve IDs for this batch only
-                                id_map_batch = bulk_fetch_media_ids([shortcodes[i] for i in batch_indices], cookie_header_global)
-                                with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                                    futures_map = {ex.submit(process_one_global, i, id_map_batch): i for i in batch_indices}
-                                    for fut in as_completed(futures_map):
-                                        idx = futures_map[fut]
-                                        try:
-                                            res = fut.result()
-                                        except Exception as e:
-                                            res = {
-                                                "Reel Link": "",
-                                                "Media ID": "",
-                                                "posted_on": "",
-                                                "caption": "",
-                                                "media_type": "",
-                                                "Total Views": 0,
-                                                "Total Likes": 0,
-                                                "Total Comments": 0,
-                                                "status": f"error: {type(e).__name__}",
-                                            }
-                                        rows_by_index[idx] = res
-                                        completed += 1
-                                        if completed % 50 == 0 or completed == total:
-                                            try:
-                                                ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
-                                                df_inc = _ensure_arrow_safe(pd.DataFrame(ordered))
-                                                table_ph.dataframe(df_inc, width="stretch", hide_index=True)
-                                            except Exception:
-                                                pass
-                                            prog.progress(min(completed / total, 1.0))
-                                # Optional pause between batches to mitigate rate-limits
-                                if end_i < total and int(csv_pause_secs) > 0:
-                                    time.sleep(int(csv_pause_secs))
+                                        pass
                             
-                            # Final render
-                            if rows_by_index:
-                                ordered = [rows_by_index[i] for i in sorted(rows_by_index.keys())]
-                                df_final = _ensure_arrow_safe(pd.DataFrame(ordered))
-                                table_ph.dataframe(df_final, width="stretch", hide_index=True)
-                                # Persist results for download across reruns
-                                st.session_state["reels_csv_results"] = {
-                                    "df": df_final,
-                                    "count": len(ordered),
-                                }
-                                st.session_state["reels_csv_processing"] = False
+                            ref = f"https://www.instagram.com/p/{sc}/"
+                            stats = {}
+                            
+                            # Strategy 0: For unauthenticated requests, use NEW direct GraphQL method
+                            if not cookie_header_global:
+                                try:
+                                    stats_graphql_result = fetch_reel_metrics_public(sc, max_retries=3)
+                                    media_id_from_graphql = stats_graphql_result.get("media_id") if stats_graphql_result else None
+                                    if media_id_from_graphql:
+                                        media_id = media_id_from_graphql
+                                    if stats_graphql_result and stats_graphql_result.get("play_count"):
+                                        stats = {k: v for k, v in stats_graphql_result.items() if not k.startswith("_")}
+                                    elif stats_graphql_result:
+                                        stats = {k: v for k, v in stats_graphql_result.items() if not k.startswith("_")}
+                                except Exception:
+                                    pass
+                            
+                            # Strategy 0b: Fallback to OLD GraphQL method if NEW one failed
+                            if (not stats or not stats.get("play_count")) and not cookie_header_global:
+                                try:
+                                    stats_graphql_old = fetch_reel_stats_via_graphql(sc, cookie_header="", debug=False)
+                                    if stats_graphql_old and stats_graphql_old.get("play_count"):
+                                        stats = {k: v for k, v in stats_graphql_old.items() if not k.startswith("_")}
+                                    elif stats_graphql_old:
+                                        stats_temp = {k: v for k, v in stats_graphql_old.items() if not k.startswith("_")}
+                                        if not stats or len(stats_temp) > len(stats):
+                                            stats = stats_temp
+                                except Exception:
+                                    pass
+                            
+                            # Strategy 1: Try fetching stats by pk
+                            if media_id and cookie_header_global:
+                                try:
+                                    stats_new = fetch_media_stats_by_pk(media_id, cookie_header_global, referer_url=ref)
+                                    if stats_new and stats_new.get("play_count"):
+                                        stats = stats_new
+                                except Exception:
+                                    pass
+                            
+                            # Strategy 2: Try shortcode endpoint
+                            if not stats or not stats.get("play_count"):
+                                cookie_to_use = cookie_header_global if cookie_header_global else ""
+                                try:
+                                    item = resolve_media_by_shortcode(sc, cookie_to_use)
+                                    if item:
+                                        stats_from_shortcode = parse_stats_from_item(item)
+                                        if stats_from_shortcode.get("play_count"):
+                                            stats = stats_from_shortcode
+                                except Exception:
+                                    pass
+                            
+                            # Strategy 3: Try play_count with cookies
+                            if (not stats or not stats.get("play_count")) and cookie_header_global:
+                                try:
+                                    play_count = fetch_play_count_with_cookies(f"https://www.instagram.com/reel/{sc}/", cookie_header_global)
+                                    if play_count:
+                                        stats = {"play_count": play_count, "shortcode": sc}
+                                except Exception:
+                                    pass
+                            
+                            # Strategy 4: GraphQL fallback
+                            if not stats or not stats.get("play_count"):
+                                try:
+                                    stats_graphql = fetch_reel_stats_via_graphql(sc, cookie_header=cookie_header_global or "", debug=False)
+                                    if stats_graphql and stats_graphql.get("play_count"):
+                                        stats = {k: v for k, v in stats_graphql.items() if not k.startswith("_")}
+                                except Exception:
+                                    pass
+                            
+                            # Get media_id from stats or from earlier resolution
+                            media_id_final = stats.get("media_id") or stats.get("id") if stats else media_id
+                            
+                            # Get play_count from stats
+                            play_count = None
+                            if stats:
+                                play_count = (
+                                    stats.get("play_count")
+                                    or stats.get("video_play_count")
+                                    or stats.get("view_count")
+                                    or stats.get("video_view_count")
+                                )
+                            play_count = play_count if play_count is not None else 0
+                            like_count = stats.get("like_count") if stats else 0
+                            comment_count = stats.get("comment_count") if stats else 0
+                            
+                            # Status
+                            if stats and play_count:
+                                status = "ok"
+                            else:
+                                status = stats.get("_status_code", "no_data") if stats else "failed"
+                            
+                            return {
+                                "Reel Link": link,
+                                "Media ID": media_id_final if media_id_final else "",
+                                "posted_on": stats.get("posted_on") if stats else "",
+                                "Total Views": play_count,
+                                "Total Likes": like_count,
+                                "Total Comments": comment_count,
+                                "status": status,
+                            }
+                        
+                        completed_bulk = 0
+                        rows_by_index_bulk: Dict[int, Dict[str, Any]] = {}
+                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                            futures_map_bulk = {ex.submit(process_one_bulk, i): i for i in range(total_bulk)}
+                            for fut in as_completed(futures_map_bulk):
+                                idx = futures_map_bulk[fut]
+                                try:
+                                    res = fut.result()
+                                except Exception as e:
+                                    res = {
+                                        "Reel Link": "",
+                                        "Media ID": "",
+                                        "posted_on": "",
+                                        "Total Views": 0,
+                                        "Total Likes": 0,
+                                        "Total Comments": 0,
+                                        "status": f"error: {type(e).__name__}",
+                                    }
+                                rows_by_index_bulk[idx] = res
+                                completed_bulk += 1
+                                if completed_bulk % 5 == 0 or completed_bulk == total_bulk:
+                                    try:
+                                        ordered = [rows_by_index_bulk[i] for i in sorted(rows_by_index_bulk.keys())]
+                                        df_inc = _ensure_arrow_safe_bulk(pd.DataFrame(ordered))
+                                        table_ph_bulk.dataframe(df_inc, width="stretch", hide_index=True)
+                                    except Exception:
+                                        pass
+                                    prog_bulk.progress(min(completed_bulk / total_bulk, 1.0))
+                        
+                        if rows_by_index_bulk:
+                            ordered = [rows_by_index_bulk[i] for i in sorted(rows_by_index_bulk.keys())]
+                            df_final_bulk = _ensure_arrow_safe_bulk(pd.DataFrame(ordered))
+                            table_ph_bulk.dataframe(df_final_bulk, width="stretch", hide_index=True)
+                            
+                            try:
+                                csv_bytes = df_final_bulk.to_csv(index=False).encode("utf-8")
+                                dl_ph_bulk.download_button(
+                                    label="Download CSV",
+                                    data=csv_bytes,
+                                    file_name=f"bulk_instagram_reels_{len(ordered)}.csv",
+                                    mime="text/csv",
+                                    key="download_bulk_inline",
+                                )
+                            except Exception:
+                                pass
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
-    
-    # Show persisted CSV results when available and not processing
-    if st.session_state.get("reels_csv_results") is not None and not st.session_state.get("reels_csv_processing"):
-        res = st.session_state["reels_csv_results"]
-        st.markdown("### CSV Results")
-        try:
-            csv_bytes = res["df"].to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Results CSV",
-                data=csv_bytes,
-                file_name=f"instagram_reels_analysis_{res['count']}.csv",
-                mime="text/csv",
-                key="download_csv_persist",
-            )
-        except Exception:
-            pass
-        if st.button("Clear Results", key="clear_csv_results"):
-            st.session_state["reels_csv_results"] = None
-            st.rerun()
 
     st.markdown("---")
     st.markdown("**Option 2: Enter Reel Links Manually**")
@@ -1953,8 +2336,8 @@ with tab_reels:
         key="batch_input",
     ).strip()
     # Pre-run options (must be before clicking Fetch)
-    fetch_captions_manual_opt = st.checkbox("Fetch captions (slower)", value=False, key="manual_fetch_captions")
-    if not IS_PROD:
+    fetch_captions_manual_opt = False  # Removed - captions not needed
+    if False and not IS_PROD:  # Commented out for now - uncomment when debugging needed
         show_diag_manual_opt = st.checkbox("Show diagnostics", value=False, key="manual_show_diag")
     else:
         show_diag_manual_opt = False
@@ -1966,7 +2349,8 @@ with tab_reels:
         clear_batch = st.button("Clear", key="batch_clear")
 
     if clear_batch:
-        st.session_state["batch_input"] = ""
+        if "batch_input" in st.session_state:
+            del st.session_state["batch_input"]
         st.rerun()
 
     if start_batch:
@@ -2078,6 +2462,7 @@ with tab_reels:
                     # Even if media_id is missing, we can still try to get stats from shortcode endpoint
                     ref = f"https://www.instagram.com/p/{sc}/"
                     stats = {}
+                    stats_graphql_result = None  # Initialize for debugging
                     
                     # Debug: Check cookie header
                     if i == 0 and show_diag_manual_opt:
@@ -2085,14 +2470,13 @@ with tab_reels:
                         st.write(f"🔍 Debug: len(cookie_header_global) = {len(cookie_header_global) if cookie_header_global else 0}")
                         st.write(f"🔍 Debug: bool(cookie_header_global) = {bool(cookie_header_global)}")
                     
-                    # Strategy 0: For unauthenticated requests, use GraphQL method (bulk-route + graphql)
-                    # This is the method that works when user is not logged in
-                    stats_graphql_result = None  # Store for debug display
+                    # Strategy 0: For unauthenticated requests, use NEW direct GraphQL method (doc_id=8845758582119845)
+                    # This is the recommended method from the documentation
                     if not cookie_header_global:
                         if i == 0 and show_diag_manual_opt:
-                            st.write(f"🔄 Strategy 0: Trying GraphQL method (bulk-route + graphql) for unauthenticated request")
+                            st.write(f"🔄 Strategy 0: Trying NEW direct GraphQL method (doc_id=8845758582119845) for unauthenticated request")
                         try:
-                            stats_graphql_result = fetch_reel_stats_via_graphql(sc, cookie_header="", debug=show_diag_manual_opt)
+                            stats_graphql_result = fetch_reel_metrics_public(sc, max_retries=3)
                             
                             # Extract media_id from GraphQL result if available, and use stats if any
                             media_id_from_graphql = stats_graphql_result.get("media_id") if stats_graphql_result else None
@@ -2109,33 +2493,56 @@ with tab_reels:
                                 resolver_used = resolver_used + "+graphql_partial"
                         except Exception as e:
                             if i == 0 and show_diag_manual_opt:
-                                st.error(f"❌ Strategy 0 (GraphQL) exception: {type(e).__name__}: {e}")
+                                st.error(f"❌ Strategy 0 (NEW GraphQL) exception: {type(e).__name__}: {e}")
                                 import traceback
                                 st.code(traceback.format_exc(), language="python")
+                    
+                    # Strategy 0b: Fallback to OLD GraphQL method if NEW one failed
+                    if (not stats or not stats.get("play_count")) and not cookie_header_global:
+                        if i == 0 and show_diag_manual_opt:
+                            st.write(f"🔄 Strategy 0b: Trying OLD GraphQL method (bulk-route + graphql) as fallback")
+                        try:
+                            stats_graphql_old = fetch_reel_stats_via_graphql(sc, cookie_header="", debug=show_diag_manual_opt)
+                            if stats_graphql_old and stats_graphql_old.get("play_count"):
+                                stats = {k: v for k, v in stats_graphql_old.items() if not k.startswith("_")}
+                                resolver_used = resolver_used + "+old_graphql_fallback"
+                                if i == 0 and show_diag_manual_opt:
+                                    st.success(f"✅ Strategy 0b worked! play_count: {stats.get('play_count')}")
+                            elif stats_graphql_old:
+                                # Even if no play_count, use whatever we got
+                                stats_temp = {k: v for k, v in stats_graphql_old.items() if not k.startswith("_")}
+                                if not stats or len(stats_temp) > len(stats):
+                                    stats = stats_temp
+                                    resolver_used = resolver_used + "+old_graphql_partial"
+                        except Exception as e:
+                            if i == 0 and show_diag_manual_opt:
+                                st.warning(f"⚠️ Strategy 0b failed: {type(e).__name__}: {e}")
                     
                     # Strategy 1: If we have media_id, try fetching stats by pk
                     if media_id and cookie_header_global:
                         if i == 0 and show_diag_manual_opt:
                             st.write(f"🔍 Strategy 1: Fetching stats for media_id: {media_id} via GET /api/v1/media/{media_id}/info/")
-                    try:
-                        stats = fetch_media_stats_by_pk(
-                            media_id,
-                            cookie_header_global,
-                            referer_url=ref,
-                        )
-                        # Debug: show what we got (first item only)
-                        if i == 0 and show_diag_manual_opt:
-                            st.json({"fetch_media_stats_by_pk_response": stats})
-                            if stats and stats.get("play_count"):
-                                st.success(f"✅ Strategy 1 worked! play_count: {stats.get('play_count')}")
-                            elif stats:
-                                st.warning(f"⚠️ Strategy 1 returned stats but no play_count. Keys: {list(stats.keys())}")
-                            else:
-                                st.warning("⚠️ Strategy 1 returned empty stats")
-                    except Exception as e:
-                        if i == 0 and show_diag_manual_opt:
-                            st.error(f"❌ Strategy 1 failed: {type(e).__name__}: {e}")
-                        stats = {}
+                        try:
+                            stats_new = fetch_media_stats_by_pk(
+                                media_id,
+                                cookie_header_global,
+                                referer_url=ref,
+                            )
+                            # Debug: show what we got (first item only)
+                            if i == 0 and show_diag_manual_opt:
+                                st.json({"fetch_media_stats_by_pk_response": stats_new})
+                                if stats_new and stats_new.get("play_count"):
+                                    st.success(f"✅ Strategy 1 worked! play_count: {stats_new.get('play_count')}")
+                                elif stats_new:
+                                    st.warning(f"⚠️ Strategy 1 returned stats but no play_count. Keys: {list(stats_new.keys())}")
+                                else:
+                                    st.warning("⚠️ Strategy 1 returned empty stats")
+                            # Only overwrite stats if we got something useful
+                            if stats_new and stats_new.get("play_count"):
+                                stats = stats_new
+                        except Exception as e:
+                            if i == 0 and show_diag_manual_opt:
+                                st.error(f"❌ Strategy 1 failed: {type(e).__name__}: {e}")
                     
                     # Strategy 2: Try fetching directly from shortcode endpoint (PRIMARY METHOD)
                     # API: GET https://www.instagram.com/api/v1/media/shortcode/{shortcode}/info/
@@ -2202,7 +2609,7 @@ with tab_reels:
                         try:
                             stats_graphql = fetch_reel_stats_via_graphql(sc, cookie_header=cookie_header_global or "", debug=show_diag_manual_opt)
                             if stats_graphql and stats_graphql.get("play_count"):
-                                stats = stats_graphql
+                                stats = {k: v for k, v in stats_graphql.items() if not k.startswith("_")}
                                 resolver_used = resolver_used + "+graphql_fallback"
                                 if i == 0 and show_diag_manual_opt:
                                     st.success(f"✅ Strategy 4 (GraphQL fallback) worked! play_count: {stats.get('play_count')}")
@@ -2227,7 +2634,7 @@ with tab_reels:
                             cap = ""
                     shortcode = (stats.get("shortcode") if stats else None) or sc
                     # Get media_id from stats or from earlier resolution
-                    media_id_final = stats.get("media_id") if stats else media_id
+                    media_id_final = stats.get("media_id") or stats.get("id") if stats else media_id
                     
                     # Get play_count from stats, checking multiple possible field names
                     play_count = None
@@ -2242,25 +2649,21 @@ with tab_reels:
                     like_count = stats.get("like_count") if stats else 0
                     comment_count = stats.get("comment_count") if stats else 0
                     
-                    # Status: "ok" if we have play_count, "partial" if we have stats but no play_count, "failed" if no stats
+                    # Status: "ok" if we have play_count, otherwise show the status code
                     if stats and play_count:
                         status = "ok"
-                    elif stats:
-                        status = "partial (no play_count)"
                     else:
-                        status = "failed"
+                        # Get status code from stats if available
+                        status = stats.get("_status_code", "failed") if stats else "no_data"
                     
                     result_dict = {
                         "Reel Link": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else "",
                         "Media ID": media_id_final if media_id_final else "",
                         "posted_on": stats.get("posted_on") if stats else "",
-                        "caption": cap,
-                        "media_type": (stats.get("product_type") or stats.get("media_type")) if stats else "",
                         "Total Views": play_count,
                         "Total Likes": like_count,
                         "Total Comments": comment_count,
                         "status": status,
-                        "diag": (f"resolver={resolver_used}; play_count={'✓' if play_count else '✗'}; stats={'✓' if stats else '✗'}") if show_diag_manual_opt else "",
                     }
                     
                     # Store debug info from Strategy 0 for display after thread completes
